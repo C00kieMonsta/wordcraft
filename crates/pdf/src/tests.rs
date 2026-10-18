@@ -1020,6 +1020,7 @@ fn bookmark_destination_is_the_page_of_its_start() {
         vectors: HashMap::new(),
         tags: Vec::new(),
         tag_index: HashMap::new(),
+        tag_at: (0, 0, 0),
         links: Vec::new(),
         bookmarks: std::cell::OnceCell::new(),
     };
@@ -1859,4 +1860,121 @@ fn pages_print_scaled_to_other_paper() {
         let bytes = export(&d, &PdfOptions { paper: Some(paper), ..Default::default() }).unwrap();
         assert_eq!(size(&bytes), size(&plain));
     }
+}
+
+/// #2956: a shape's fill transparency is the fill's opacity in the PDF (its outline stays
+/// opaque), and shapes are drawn in their stacking order.
+#[test]
+fn shape_fill_transparency_and_stacking_export() {
+    use wordcraft_doc::{
+        connector::ShapeExtra,
+        para::{Anchor, Float, ShapeKind, Wrap},
+        props::Rgb,
+    };
+    let shape = |fill: Rgb, z: u32, transparency: f32| InlineObject::Shape {
+        kind: ShapeKind::Rectangle,
+        w: 70.0,
+        h: 28.0,
+        fill: Some(fill),
+        stroke: Some(Rgb(0, 0, 0)),
+        stroke_width: 1.0,
+        float: Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 100.0, y: 100.0, z, ..Default::default() },
+        story: None,
+        freeform: None,
+        effects: Default::default(),
+        extra: ShapeExtra { fill_transparency: transparency, ..Default::default() },
+    };
+    let pdf = |objects: Vec<InlineObject>| {
+        let mut p = Paragraph::new();
+        for o in objects {
+            let end = p.len();
+            p.insert_object(end, o, &Default::default()).unwrap();
+        }
+        let mut d = Document::new();
+        d.body = vec![para_block(p)];
+        String::from_utf8_lossy(&export(&d, &PdfOptions { compress: false, tagged: false, ..Default::default() }).unwrap()).into_owned()
+    };
+    let half = pdf(vec![shape(Rgb(255, 0, 0), 0, 50.0)]);
+    assert!(half.contains("/ca 0.5"), "half transparent fill: {half}");
+    assert!(!pdf(vec![shape(Rgb(255, 0, 0), 0, 0.0)]).contains("/ca "), "an opaque fill needs no opacity");
+    // Red first in the document but higher in the stacking order: drawn last.
+    let (red, blue) = ("1 0 0 rg", "0 0 1 rg");
+    let raw = pdf(vec![shape(Rgb(255, 0, 0), 2, 0.0), shape(Rgb(0, 0, 255), 1, 0.0)]);
+    let (r, b) = (raw.find(red), raw.find(blue));
+    assert!(r.is_some() && b.is_some() && b < r, "blue then red: {raw}");
+}
+
+/// The titles of a tagged PDF's structure elements (headings carry theirs), in tree order.
+fn struct_titles(bytes: &[u8]) -> Vec<String> {
+    use hayro_syntax::object::{Dict, Object};
+    fn walk(o: Object, out: &mut Vec<String>, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        match o {
+            Object::Dict(d) => {
+                if let Some(t) = d.get::<hayro_syntax::object::String>(b"T") {
+                    let b = t.as_bytes();
+                    out.push(match b.strip_prefix(&[0xFE, 0xFF]) {
+                        Some(u) => {
+                            String::from_utf16_lossy(&u.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)])).collect::<Vec<_>>())
+                        }
+                        None => b.iter().map(|c| char::from(*c)).collect(),
+                    });
+                }
+                if let Some(k) = d.get::<Object>(b"K") {
+                    walk(k, out, depth + 1);
+                }
+            }
+            Object::Array(a) => a.iter::<Object>().for_each(|x| walk(x, out, depth + 1)),
+            _ => {}
+        }
+    }
+    let pdf = hayro_syntax::Pdf::new(bytes.to_vec()).unwrap();
+    let xref = pdf.xref();
+    let root: Dict = xref.get(xref.root_id()).unwrap();
+    let tree: Dict = root.get(b"StructTreeRoot").unwrap();
+    let mut out = Vec::new();
+    if let Some(k) = tree.get::<Object>(b"K") {
+        walk(k, &mut out, 0);
+    }
+    out
+}
+
+/// #2956: objects in front of the text are drawn after all of it, but the structure keeps reading
+/// order: a text box anchored in the first heading is read right after it, not after the last.
+#[test]
+fn tags_keep_reading_order_when_objects_draw_on_top() {
+    use wordcraft_doc::para::{Anchor, Float, ShapeKind, Wrap};
+    let mut d = Document::new();
+    let id = d.add_part(
+        wordcraft_doc::PartKind::TextBox,
+        vec![para_block(Paragraph::with_text("Sidebar heading", CharProps::default()).styled("Heading1"))],
+    );
+    let float = Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 300.0, y: 400.0, ..Default::default() };
+    let shape = InlineObject::Shape {
+        kind: ShapeKind::TextBox,
+        w: 200.0,
+        h: 80.0,
+        fill: None,
+        stroke: None,
+        stroke_width: 0.0,
+        float,
+        story: Some(id),
+        freeform: None,
+        effects: Default::default(),
+        extra: Default::default(),
+    };
+    let mut first = Paragraph::with_text("Alpha heading", CharProps::default()).styled("Heading1");
+    first.insert_object(0, shape, &CharProps::default()).unwrap();
+    d.body = vec![
+        para_block(first),
+        para_block(Paragraph::with_text("Bravo heading", CharProps::default()).styled("Heading1")),
+        para_block(Paragraph::with_text("Charlie heading", CharProps::default()).styled("Heading1")),
+    ];
+    let bytes = export(&d, &PdfOptions { compress: false, ..Default::default() }).unwrap();
+    let titles = struct_titles(&bytes);
+    let at = |t: &str| titles.iter().position(|x| x.contains(t)).unwrap_or_else(|| panic!("{t} in {titles:?}"));
+    assert!(at("Alpha heading") < at("Sidebar heading") && at("Sidebar heading") < at("Bravo heading"), "{titles:?}");
+    assert!(at("Bravo heading") < at("Charlie heading"), "{titles:?}");
 }

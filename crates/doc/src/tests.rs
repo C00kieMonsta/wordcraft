@@ -457,3 +457,49 @@ fn custom_props_set_get_remove() {
     assert!(!d.remove_custom_prop("other"));
     assert_eq!(d.custom_props.len(), 1);
 }
+
+/// #2956: stacking orders read from a file. Orders that only repeat document order are cleared;
+/// otherwise they are kept, and an object read without one takes its nearest earlier neighbour's
+/// (the next one's at the start) instead of stacking on top of everything.
+#[test]
+fn settle_stacking_keeps_unordered_objects_in_place() {
+    use crate::para::{Float, InlineObject, ShapeKind, Wrap};
+    let doc = |zs: &[u32]| {
+        let mut p = Paragraph::with_text("x", CharProps::default());
+        for z in zs {
+            // An order from 1000 to 9999 marks an object behind the text, for the layer case below.
+            let wrap = if (1000..10_000).contains(z) { Wrap::BehindText } else { Wrap::InFrontOfText };
+            let float = Float { wrap, z: *z, ..Default::default() };
+            let shape = InlineObject::Shape {
+                kind: ShapeKind::Rectangle,
+                w: 10.0,
+                h: 10.0,
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                float,
+                story: None,
+                freeform: None,
+                effects: Default::default(),
+                extra: Default::default(),
+            };
+            let end = p.len();
+            p.insert_object(end, shape, &CharProps::default()).unwrap();
+        }
+        let mut d = Document::new();
+        d.body = vec![para_block(p)];
+        d
+    };
+    let settled = |zs: &[u32]| {
+        let mut d = doc(zs);
+        d.settle_stacking();
+        d.body[0].as_para().unwrap().objects.iter().map(|o| o.frame().unwrap().2.z).collect::<Vec<_>>()
+    };
+    assert_eq!(settled(&[3, 5, 0, 9]), [0, 0, 0, 0], "document order");
+    assert_eq!(settled(&[0, 7, 0, 3]), [7, 7, 7, 3]);
+    assert_eq!(settled(&[0, 0]), [0, 0]);
+    assert_eq!(settled(&[u32::MAX, 1]), [u32::MAX, 1]);
+    // One without an order takes a neighbour's in its own layer: behind the text 2000, then in
+    // front none, 5 and 3: it takes 5, not 2000.
+    assert_eq!(settled(&[2000, 0, 5, 3]), [2000, 5, 5, 3]);
+}

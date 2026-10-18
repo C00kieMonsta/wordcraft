@@ -231,7 +231,11 @@ Layout|Paragraph|Spacing|para.spacing
 Layout|Arrange|Position|arrange.position
 Layout|Arrange|Wrap Text|arrange.wrap
 Layout|Arrange|Bring Forward|arrange.bringForward
+Layout|Arrange|Bring to Front|arrange.bringToFront
+Layout|Arrange|Bring in Front of Text|arrange.bringInFrontOfText
 Layout|Arrange|Send Backward|arrange.sendBackward
+Layout|Arrange|Send to Back|arrange.sendToBack
+Layout|Arrange|Send Behind Text|arrange.sendBehindText
 Layout|Arrange|Selection Pane|arrange.selectionPane
 Layout|Arrange|Align|arrange.align
 Layout|Arrange|Group|arrange.group
@@ -455,6 +459,7 @@ Chart Design|Chart Layouts|Chart Title|chart.title
 Chart Design|Chart Layouts|Legend|chart.legend
 Chart Design|Chart Layouts|Data Labels|chart.dataLabels
 Shape Format|Shape Styles|Shape Fill|shape.fill
+Shape Format|Shape Styles|Fill Transparency|shape.fill
 Shape Format|Shape Styles|Shape Outline|shape.outline
 Shape Format|Shape Styles|Shape Effects|shape.effects
 Shape Format|WordArt Styles|WordArt Quick Styles|wordArt.style

@@ -957,6 +957,11 @@ pub fn split_row(row: &RowLayout, cut: f32) -> Option<(RowLayout, RowLayout)> {
                         });
                     }
                 }
+                // A floating object's bounds: both parts keep them round what they hold of it.
+                Placed::StackStart { .. } | Placed::StackEnd => {
+                    a.push(it.clone());
+                    b.push(it.clone());
+                }
                 Placed::Image { rect, .. }
                 | Placed::Shape { rect, .. }
                 | Placed::Graphic { rect, .. }

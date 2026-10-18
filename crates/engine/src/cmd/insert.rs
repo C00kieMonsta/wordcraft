@@ -119,6 +119,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let doc = crate::io::open_path(std::path::Path::new(path)).map_err(CmdError::Failed)?;
             let mut frag = doc.body_fragment();
             super::paste::unlink_sections(&mut frag.blocks);
+            super::paste::unstack(&mut frag);
             let at = delete_selection(s)?;
             let end = s.doc.insert_fragment(&at, &frag)?;
             s.sel = Selection::caret(end);

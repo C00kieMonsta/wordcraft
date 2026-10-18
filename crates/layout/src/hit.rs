@@ -93,9 +93,15 @@ fn all_objects(page: &Page, index: usize) -> impl Iterator<Item = ObjectHit> + '
     objects_in(&page.items, index).chain(objects_in(&page.header, index)).chain(objects_in(&page.footer, index))
 }
 
+/// The objects among `items`, topmost first: their drawing order backwards (see [`crate::stack`]).
 fn objects_in(items: &[Placed], index: usize) -> impl Iterator<Item = ObjectHit> + '_ {
-    items.iter().rev().filter_map(move |it| match it {
-        Placed::Object { rect, spin, story, path, off, text_box, wrap, origin } => Some(ObjectHit {
+    crate::stack::topmost_first(items).filter_map(move |it| object_hit(it, index))
+}
+
+/// The object an item is the area of, on page `index`.
+fn object_hit(it: &Placed, index: usize) -> Option<ObjectHit> {
+    match it {
+        Placed::Object { rect, spin, story, path, off, text_box, wrap, origin, .. } => Some(ObjectHit {
             page: index,
             rect: *rect,
             spin: *spin,
@@ -107,7 +113,13 @@ fn objects_in(items: &[Placed], index: usize) -> impl Iterator<Item = ObjectHit>
             origin: *origin,
         }),
         _ => None,
-    })
+    }
+}
+
+/// A page's objects including its header's and footer's, in list order (cheaper when the
+/// order doesn't matter).
+fn listed_objects(page: &Page, index: usize) -> impl Iterator<Item = ObjectHit> + '_ {
+    page.items.iter().chain(&page.header).chain(&page.footer).filter_map(move |it| object_hit(it, index))
 }
 
 /// The story of the text (not a text box's) near (x, y): body, footnotes, endnotes.
@@ -343,10 +355,15 @@ impl DocLayout {
         self.find_object(page_hint, |o| o.text_box == Some(part))
     }
 
+    /// The objects on `page`, its header's and footer's too, in no particular order.
+    pub fn page_objects(&self, page: usize) -> Vec<ObjectHit> {
+        self.pages.get(page).map(|p| listed_objects(p, page).collect()).unwrap_or_default()
+    }
+
     /// The first object matching `f`, looking on `page_hint` first (where the caret is: one page
     /// to scan, not the whole document).
     pub fn find_object(&self, page_hint: usize, f: impl Fn(&ObjectHit) -> bool) -> Option<ObjectHit> {
-        let on = |i: usize| self.pages.get(i).and_then(|p| all_objects(p, i).find(|o| f(o)));
+        let on = |i: usize| self.pages.get(i).and_then(|p| listed_objects(p, i).find(|o| f(o)));
         on(page_hint).or_else(|| (0..self.pages.len()).filter(|i| *i != page_hint).find_map(on))
     }
 
@@ -751,10 +768,11 @@ impl DocLayout {
         self.caret(pos).map(|c| c.page)
     }
 
-    /// Table cell under a point: (story, table path, row, cell).
+    /// Table cell under a point, the topmost (a table in a text box over another): (story,
+    /// table path, row, cell).
     pub fn cell_at(&self, page: usize, x: f32, y: f32) -> Option<(StoryRef, Path, usize, usize)> {
         let p = self.pages.get(page)?;
-        p.items.iter().rev().find_map(|it| match it {
+        crate::stack::topmost_first(&p.items).find_map(|it| match it {
             Placed::Cell { rect, table, row, cell, story, covered: false, .. } if rect.contains(wordcraft_geom::Point::new(x, y)) => {
                 Some((*story, table.clone(), *row, *cell))
             }

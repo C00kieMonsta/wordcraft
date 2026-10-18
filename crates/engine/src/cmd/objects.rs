@@ -301,8 +301,24 @@ pub fn specs() -> Vec<CommandSpec> {
         })
         .params(r#"{"preset"?: "topLeft|topCenter|topRight|middleLeft|middleCenter|middleRight|bottomLeft|bottomCenter|bottomRight", "x"?: pt, "y"?: pt}"#)
         .when(has_movable),
-        CommandSpec::new("arrange.bringForward", "Bring Forward", "Layout › Arrange", |s, _| with_float(s, |f| f.wrap = Wrap::InFrontOfText)).when(has_movable),
-        CommandSpec::new("arrange.sendBackward", "Send Backward", "Layout › Arrange", |s, _| with_float(s, |f| f.wrap = Wrap::BehindText)).when(has_movable),
+        CommandSpec::new("arrange.bringForward", "Bring Forward", "Layout › Arrange", |s, _| restack(s, Restack::Forward))
+            .params(STACK_PARAMS)
+            .when(has_floating),
+        CommandSpec::new("arrange.bringToFront", "Bring to Front", "Layout › Arrange", |s, _| restack(s, Restack::Front))
+            .params(STACK_PARAMS)
+            .when(has_floating),
+        CommandSpec::new("arrange.bringInFrontOfText", "Bring in Front of Text", "Layout › Arrange", |s, _| with_float(s, |f| f.wrap = Wrap::InFrontOfText))
+            .params(r#"{}  (the selected object floats in front of the text, keeping its place in the stacking order)"#)
+            .when(has_movable),
+        CommandSpec::new("arrange.sendBackward", "Send Backward", "Layout › Arrange", |s, _| restack(s, Restack::Backward))
+            .params(STACK_PARAMS)
+            .when(has_floating),
+        CommandSpec::new("arrange.sendToBack", "Send to Back", "Layout › Arrange", |s, _| restack(s, Restack::Back))
+            .params(STACK_PARAMS)
+            .when(has_floating),
+        CommandSpec::new("arrange.sendBehindText", "Send Behind Text", "Layout › Arrange", |s, _| with_float(s, |f| f.wrap = Wrap::BehindText))
+            .params(r#"{}  (the selected object floats behind the text, keeping its place in the stacking order)"#)
+            .when(has_movable),
         CommandSpec::new("arrange.align", "Align", "Layout › Arrange", |s, v| {
             let h = p::str(v, "value").unwrap_or("center").to_string();
             let tw = super::page::sect(s).text_width();
@@ -358,16 +374,27 @@ pub fn specs() -> Vec<CommandSpec> {
         .params(r#"{"index"?: n}"#)
         .pure(),
         CommandSpec::new("shape.fill", "Shape Fill", "Shape Format › Shape Styles", |s, v| {
-            let c = p::str(v, "color").and_then(Rgb::parse);
+            // The colour changes when it is given (or when nothing is), the transparency when it is.
+            let color = (v.get("color").is_some() || v.get("transparency").is_none()).then(|| p::str(v, "color").and_then(Rgb::parse));
+            let transparency = p::f32(v, "transparency").map(|t| if t.is_finite() { t.clamp(0.0, 100.0) } else { 0.0 });
             with_obj(s, |o| {
-                if let InlineObject::Shape { fill, .. } = o {
-                    *fill = c;
-                } else if let Some(style) = super::canvas::style_mut(o) {
+                if let InlineObject::Shape { fill, extra, .. } = o {
+                    if let Some(c) = color {
+                        *fill = c;
+                    }
+                    if let Some(t) = transparency {
+                        extra.fill_transparency = t;
+                    }
+                } else if let Some(style) = super::canvas::style_mut(o)
+                    && let Some(c) = color
+                {
                     style.fill = c;
                 }
             })
         })
-        .params(r#"{"color": "RRGGBB" | null}  (a selected drawing canvas: its background)"#)
+        .params(
+            r#"{"color"?: "RRGGBB" | null, "transparency"?: percent}  (transparency 0–100, of the fill: given alone it keeps the colour, and a colour alone keeps it; a selected drawing canvas: its background, always opaque)"#,
+        )
         .when(has_shape_or_canvas),
         CommandSpec::new("shape.outline", "Shape Outline", "Shape Format › Shape Styles", |s, v| {
             let c = p::str(v, "color").and_then(Rgb::parse);
@@ -1456,6 +1483,9 @@ fn group(s: &mut Session, _: &Value) -> CmdResult {
     if picks.iter().any(|p| p.story != story) {
         return Err(CmdError::Disabled("objects in different stories (body, header, footer) can't be grouped".into()));
     }
+    // Every object of the story gets its order, so the group can take its top member's.
+    let order: Vec<Pos> = stack_list(s, story).into_iter().map(|(p, _)| p).collect();
+    number_stack(s, &order)?;
     for pos in &picks {
         if pos.path.depth() > 0 || !movable_story(s, pos.story) {
             return Err(CmdError::Disabled("only objects in the body text, headers and footers (not in tables) can be grouped".into()));
@@ -1477,10 +1507,13 @@ fn group(s: &mut Session, _: &Value) -> CmdResult {
     if found.iter().any(|(_, h)| h.page != page) {
         return Err(CmdError::Disabled("objects on different pages can't be grouped".into()));
     }
-    // The members as they show on the page: each one's unturned frame and turn (a group among
-    // them gives its members, its turn taken into theirs).
+    // The members as they show on the page, bottom to top as they stack (a group's members
+    // drawn in that order): each one's unturned frame and turn (a group among them gives its
+    // members, its turn taken into theirs).
+    let mut stacked: Vec<&(InlineObject, wordcraft_layout::hit::ObjectHit)> = found.iter().collect();
+    stacked.sort_by_key(|(o, _)| o.frame().map(|(_, _, f)| (f.wrap != Wrap::BehindText, f.stack_key())));
     let mut shown: Vec<([f32; 4], Spin, &InlineObject)> = Vec::new();
-    for (obj, hit) in &found {
+    for (obj, hit) in stacked.iter().copied() {
         let r = hit.rect;
         match obj {
             InlineObject::Group { .. } => shown.extend(shown_members(obj, [r.x, r.y, r.w, r.h])),
@@ -1513,9 +1546,11 @@ fn group(s: &mut Session, _: &Value) -> CmdResult {
             GroupChild { x: x - x0, y: y - y0, obj }
         })
         .collect();
-    // The group takes the first member's placement; its members keep their own alt text.
+    // The group takes the first member's placement and the top one's place in the stacking
+    // order; its members keep their own alt text.
     let mut float = found.first().and_then(|(o, _)| o.frame()).map(|(_, _, f)| Float { alt: Default::default(), ..f.clone() }).unwrap_or_default();
     float.set_spin(Spin::default());
+    float.z = stacked.last().and_then(|(o, _)| o.frame()).map_or(0, |(_, _, f)| f.z);
     let grouped = InlineObject::Group { w, h, float, ch_w: w, ch_h: h, children, canvas: None };
     // Take the members out, last first so the earlier positions hold, and put the group where
     // the first one was.
@@ -1609,6 +1644,99 @@ fn shown_members(group: &InlineObject, [x, y, w, h]: [f32; 4]) -> Vec<([f32; 4],
             ([cx - mw / 2.0, cy - mh / 2.0, mw, mh], own.within(outer), c)
         })
         .collect()
+}
+
+const STACK_PARAMS: &str = r#"{}  (the selected floating object's place in the stacking order. Objects behind the text and those in front of it stack apart: Bring Forward and Send Backward move it past the next object of its layer that overlaps it, or the next one when none does; Bring to Front and Send to Back to the top or bottom)"#;
+
+/// How [`restack`] moves an object in the stacking order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Restack {
+    Forward,
+    Front,
+    Backward,
+    Back,
+}
+
+/// Most floating objects one story restacks (hostile documents).
+const MAX_STACK: usize = 100_000;
+
+/// The floating pictures, shapes and groups of `story` in stacking order, bottom first, and
+/// whether each is in front of the text. Ties go by document order, as they are drawn.
+fn stack_list(s: &Session, story: StoryRef) -> Vec<(Pos, bool)> {
+    let mut v: Vec<((bool, u32), Pos, bool)> = Vec::new();
+    'paths: for path in s.doc.para_paths(story) {
+        let Some(p) = s.doc.para(story, &path) else { continue };
+        for off in p.object_offsets() {
+            if let Some((_, _, f)) =
+                p.object_at(off).filter(|o| o.is_drawing()).and_then(InlineObject::frame).filter(|(_, _, f)| f.wrap != Wrap::Inline)
+            {
+                v.push((f.stack_key(), Pos { story, path: path.clone(), off }, f.wrap != Wrap::BehindText));
+                if v.len() >= MAX_STACK {
+                    break 'paths;
+                }
+            }
+        }
+    }
+    v.sort_by_key(|a| a.0);
+    v.into_iter().map(|(_, pos, front)| (pos, front)).collect()
+}
+
+/// Bring Forward, Bring to Front, Send Backward and Send to Back: move the selected floating
+/// object in its story's stacking order, then number the story's objects bottom to top. One step
+/// goes past the nearest object of its layer that overlaps it on the page (or the nearest one
+/// when none does); an object already at that end stays.
+fn restack(s: &mut Session, how: Restack) -> CmdResult {
+    let (pos, _) = selected(s).ok_or_else(|| CmdError::Disabled("no picture or shape selected".into()))?;
+    let list = stack_list(s, pos.story);
+    let i = list.iter().position(|(p, _)| *p == pos).ok_or_else(|| CmdError::Disabled("select a floating picture or shape first".into()))?;
+    let front = list.get(i).is_some_and(|(_, f)| *f);
+    let mut order: Vec<Pos> = list.iter().map(|(p, _)| p.clone()).collect();
+    let me = order.remove(i);
+    // Objects of its layer above it (nearest first) or below it (nearest first), as indices
+    // into `order` with it taken out.
+    let layer = |r: Vec<usize>| -> Vec<usize> {
+        r.into_iter().filter(|&j| list.get(if j >= i { j + 1 } else { j }).is_some_and(|(_, f)| *f == front)).collect()
+    };
+    let at = match how {
+        Restack::Front => Some(order.len()),
+        Restack::Back => Some(0),
+        Restack::Forward => step(s, &me, &order, layer((i..order.len()).collect())).map(|j| j + 1),
+        Restack::Backward => step(s, &me, &order, layer((0..i).rev().collect())),
+    };
+    let Some(at) = at.map(|a| a.min(order.len())).filter(|&a| a != i) else {
+        return Ok(json!({"object": super::pos_json(&pos), "moved": false}));
+    };
+    order.insert(at, me);
+    number_stack(s, &order)?;
+    Ok(json!({"object": super::pos_json(&pos), "moved": true}))
+}
+
+/// Give the objects of `order` (a story's floating objects, bottom first) the stacking orders 1,
+/// 2, 3… they stand at, touching only those that change.
+fn number_stack(s: &mut Session, order: &[Pos]) -> Result<(), CmdError> {
+    for (k, p) in order.iter().enumerate() {
+        let z = u32::try_from(k + 1).unwrap_or(u32::MAX);
+        let same = s.doc.para_at(p).and_then(|q| q.object_at(p.off)).and_then(InlineObject::frame).is_some_and(|(_, _, f)| f.z == z);
+        if !same {
+            edit_float(s, p, |f| f.z = z)?;
+        }
+    }
+    Ok(())
+}
+
+/// Of the objects `cands` (indices into `order`, nearest first), the first that overlaps the
+/// object at `me` on its page, else the nearest.
+fn step(s: &mut Session, me: &Pos, order: &[Pos], cands: Vec<usize>) -> Option<usize> {
+    let layout = s.layout();
+    // Only objects on its own page can overlap it: that page is looked at once.
+    let over: std::collections::HashSet<Pos> = match layout.object(me, s.page_hint) {
+        Some(mine) => {
+            let r = mine.bounds();
+            layout.page_objects(mine.page).into_iter().filter(|o| o.bounds().intersects(&r)).map(|o| o.pos()).collect()
+        }
+        None => Default::default(),
+    };
+    cands.iter().copied().find(|&j| order.get(j).is_some_and(|p| over.contains(p))).or_else(|| cands.first().copied())
 }
 
 fn all_objects(s: &Session) -> Vec<(Pos, InlineObject)> {
@@ -2637,5 +2765,246 @@ mod tests {
             }
         }
         assert!(!holds_ink(&group), "a group of charts is not pinned");
+    }
+
+    /// Three floating rectangles filled red, green and blue, in that document order: red and
+    /// green overlap, blue stands apart. Red is selected.
+    fn three_shapes() -> Session {
+        use wordcraft_doc::para::{Anchor, ShapeKind};
+        let mut d = wordcraft_doc::Document::from_text("Some text under the shapes.");
+        let obj = wordcraft_doc::para::OBJ.len_utf8();
+        for (i, (fill, x)) in [(Rgb(255, 0, 0), 100.0), (Rgb(0, 255, 0), 150.0), (Rgb(0, 0, 255), 400.0)].into_iter().enumerate() {
+            let float = Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x, y: 100.0, ..Default::default() };
+            let shape = InlineObject::Shape {
+                kind: ShapeKind::Rectangle,
+                w: 100.0,
+                h: 100.0,
+                fill: Some(fill),
+                stroke: None,
+                stroke_width: 0.0,
+                float,
+                story: None,
+                freeform: None,
+                effects: Default::default(),
+                extra: Default::default(),
+            };
+            d.insert_object(&Pos::body(0, i * obj), shape, &Default::default()).unwrap();
+        }
+        let mut s = Session::new(d);
+        pick(&mut s, 'r');
+        s
+    }
+
+    /// The object filled `c` ('r', 'g' or 'b').
+    fn shape_at(s: &Session, c: char) -> Pos {
+        let want = match c {
+            'r' => Rgb(255, 0, 0),
+            'g' => Rgb(0, 255, 0),
+            _ => Rgb(0, 0, 255),
+        };
+        all_objects(s).into_iter().find(|(_, o)| matches!(o, InlineObject::Shape { fill: Some(f), .. } if *f == want)).unwrap().0
+    }
+
+    fn pick(s: &mut Session, c: char) {
+        let pos = shape_at(s, c);
+        let end = Pos { off: pos.off + wordcraft_doc::para::OBJ.len_utf8(), ..pos.clone() };
+        s.run("select.range", &json!({"anchor": pos, "focus": end})).unwrap();
+    }
+
+    /// The shapes bottom to top, as letters.
+    fn stacking(s: &Session) -> String {
+        stack_list(s, StoryRef::Body)
+            .iter()
+            .map(|(p, _)| match s.doc.para_at(p).and_then(|q| q.object_at(p.off)) {
+                Some(InlineObject::Shape { fill: Some(Rgb(255, 0, 0)), .. }) => 'r',
+                Some(InlineObject::Shape { fill: Some(Rgb(0, 255, 0)), .. }) => 'g',
+                _ => 'b',
+            })
+            .collect()
+    }
+
+    /// #2956: Bring Forward and Send Backward step past the nearest overlapping object of the
+    /// layer (or the nearest one when none overlaps); Bring to Front and Send to Back go to the
+    /// ends. Each is one undo step, and what is drawn and hit follows.
+    #[test]
+    fn stacking_order_commands() {
+        let mut s = three_shapes();
+        assert_eq!(stacking(&s), "rgb", "document order");
+        s.run("arrange.bringForward", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "grb", "past green, which overlaps it");
+        s.run("arrange.bringForward", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "gbr", "past blue: nothing above overlaps");
+        let r = s.run("arrange.bringForward", &json!({})).unwrap();
+        assert_eq!((stacking(&s).as_str(), r["moved"].as_bool()), ("gbr", Some(false)), "already on top");
+        s.run("arrange.sendToBack", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "rgb");
+        s.run("arrange.bringToFront", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "gbr");
+        s.run("arrange.sendBackward", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "rgb", "below green, the nearest one under it that overlaps");
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "gbr", "one undo step");
+        // Every object now has its own order; the document keeps it.
+        let z: Vec<u32> = all_objects(&s).iter().filter_map(|(_, o)| o.frame().map(|(_, _, f)| f.z)).collect();
+        assert_eq!(z, [3, 1, 2]);
+        // The press where red and green overlap grabs red, which is on top.
+        let hit = s.layout().object_at(0, 175.0, 150.0, 0.0).unwrap();
+        assert_eq!(hit.pos(), shape_at(&s, 'r'));
+        // A new object goes on top.
+        pick(&mut s, 'g');
+        s.run("arrange.copyTo", &json!({"x": 160, "y": 110})).unwrap();
+        let copy = selected(&s).unwrap().1;
+        assert_eq!(copy.frame().map(|(_, _, f)| f.z), Some(0), "the copy has no order of its own: it stacks on top");
+    }
+
+    /// #2956: behind the text and in front of it stack apart; Send Behind Text and Bring in
+    /// Front of Text change the layer and keep the order.
+    #[test]
+    fn layers_stack_apart() {
+        let mut s = three_shapes();
+        pick(&mut s, 'g');
+        s.run("arrange.sendBehindText", &json!({})).unwrap();
+        let wrap = |s: &Session, c| {
+            s.doc.para_at(&shape_at(s, c)).and_then(|p| p.object_at(shape_at(s, c).off)).and_then(|o| o.frame().map(|(_, _, f)| f.wrap))
+        };
+        assert_eq!(wrap(&s, 'g'), Some(Wrap::BehindText));
+        pick(&mut s, 'r');
+        s.run("arrange.bringForward", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "gbr", "green is behind the text: red goes past blue, not green");
+        pick(&mut s, 'g');
+        let r = s.run("arrange.bringForward", &json!({})).unwrap();
+        assert_eq!(r["moved"].as_bool(), Some(false), "nothing else behind the text");
+        s.run("arrange.bringInFrontOfText", &json!({})).unwrap();
+        assert_eq!((wrap(&s, 'g'), stacking(&s).as_str()), (Some(Wrap::InFrontOfText), "gbr"));
+    }
+
+    /// #2956: equal orders go by document order; inline objects aren't arranged; the commands
+    /// take no parameters, so junk changes nothing.
+    #[test]
+    fn stacking_ties_inline_and_junk() {
+        let mut s = three_shapes();
+        for c in ['r', 'g', 'b'] {
+            let at = shape_at(&s, c);
+            edit_float(&mut s, &at, |f| f.z = 5).unwrap();
+        }
+        assert_eq!(stacking(&s), "rgb");
+        for junk in [json!(null), json!([1, 2]), json!({"z": -1, "steps": 1e300}), json!("front")] {
+            s.run("arrange.bringToFront", &junk).unwrap();
+        }
+        assert_eq!(stacking(&s), "gbr");
+        // In line with the text: greyed out, as in Word.
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("insert.shape", &json!({"kind": "rectangle"})).unwrap();
+        for id in ["arrange.bringForward", "arrange.bringToFront", "arrange.sendBackward", "arrange.sendToBack"] {
+            assert!(matches!(s.run(id, &json!({})), Err(CmdError::Disabled(_))), "{id}");
+        }
+        // Bring in Front of Text floats it.
+        s.run("arrange.bringInFrontOfText", &json!({})).unwrap();
+        assert!(selected(&s).is_some_and(|(_, o)| o.is_floating()));
+    }
+
+    /// #2956: Shape Fill's transparency keeps the colour, a colour keeps the transparency, and
+    /// both are clamped.
+    #[test]
+    fn shape_fill_transparency() {
+        let mut s = three_shapes();
+        let fill = |s: &Session| match selected(s) {
+            Some((_, InlineObject::Shape { fill, extra, .. })) => (fill, extra.fill_transparency),
+            _ => panic!("no shape"),
+        };
+        s.run("shape.fill", &json!({"transparency": 50})).unwrap();
+        assert_eq!(fill(&s), (Some(Rgb(255, 0, 0)), 50.0));
+        s.run("shape.fill", &json!({"color": "00FF00"})).unwrap();
+        assert_eq!(fill(&s), (Some(Rgb(0, 255, 0)), 50.0));
+        s.run("shape.fill", &json!({"transparency": 400})).unwrap();
+        assert_eq!(fill(&s).1, 100.0);
+        s.run("shape.fill", &json!({"transparency": -3})).unwrap();
+        assert_eq!(fill(&s).1, 0.0);
+        s.run("shape.fill", &json!({"color": "0000FF", "transparency": 25})).unwrap();
+        assert_eq!(fill(&s), (Some(Rgb(0, 0, 255)), 25.0));
+        s.run("shape.fill", &json!({"transparency": "half"})).unwrap();
+        assert_eq!(fill(&s), (Some(Rgb(0, 0, 255)), 25.0), "junk changes nothing");
+        s.run("edit.undo", &json!({})).unwrap();
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(fill(&s).1, 0.0, "one undo step each");
+        // Saved and opened again.
+        s.run("shape.fill", &json!({"transparency": 60})).unwrap();
+        let back = wordcraft_docx::read(&wordcraft_docx::write(&s.doc).unwrap()).unwrap();
+        let t = back.para(StoryRef::Body, &wordcraft_doc::Path::top(0)).and_then(|p| {
+            p.objects.iter().find_map(|o| match o {
+                InlineObject::Shape { extra, .. } if extra.fill_transparency > 0.0 => Some(extra.fill_transparency),
+                _ => None,
+            })
+        });
+        assert_eq!(t, Some(60.0));
+    }
+
+    /// #2956: grouping keeps the stacking order: the members are drawn bottom to top as they
+    /// stacked, whatever their document order, and the group takes the top one's place.
+    #[test]
+    fn group_keeps_the_stacking_order() {
+        let mut s = three_shapes();
+        s.run("arrange.bringToFront", &json!({})).unwrap();
+        assert_eq!(stacking(&s), "gbr", "red, first in the document, is on top");
+        let red_z = s.doc.para_at(&shape_at(&s, 'r')).and_then(|p| p.object_at(shape_at(&s, 'r').off)).and_then(|o| o.frame().map(|(_, _, f)| f.z));
+        s.run("select.addObject", &json!({"pos": shape_at(&s, 'g')})).unwrap();
+        s.run("arrange.group", &json!({})).unwrap();
+        let Some((_, InlineObject::Group { children, float, .. })) = selected(&s) else { panic!("no group") };
+        let fills: Vec<Option<Rgb>> = children
+            .iter()
+            .map(|c| match &c.obj {
+                InlineObject::Shape { fill, .. } => *fill,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, [Some(Rgb(0, 255, 0)), Some(Rgb(255, 0, 0))], "green drawn first, red over it");
+        assert_eq!(Some(float.z), red_z, "the group stacks where red did");
+        // Ungrouped, they keep that order.
+        s.run("arrange.ungroup", &json!({})).unwrap();
+        let rg: String = stacking(&s).chars().filter(|c| *c != 'b').collect();
+        assert_eq!(rg, "gr");
+    }
+
+    fn z_of(s: &Session, pos: &Pos) -> Option<(Wrap, u32)> {
+        s.doc.para_at(pos).and_then(|p| p.object_at(pos.off)).and_then(|o| o.frame().map(|(_, _, f)| (f.wrap, f.z)))
+    }
+
+    /// #2956: a group's members stack by layer first: an object behind the text stays under one in
+    /// front of it whatever their orders, and the group takes the top member's order.
+    #[test]
+    fn group_keeps_the_layers_of_its_members() {
+        let mut s = three_shapes();
+        let (r, g) = (shape_at(&s, 'r'), shape_at(&s, 'g'));
+        edit_float(&mut s, &g, |f| {
+            f.wrap = Wrap::BehindText;
+            f.z = 9;
+        })
+        .unwrap();
+        edit_float(&mut s, &r, |f| f.z = 3).unwrap();
+        s.run("select.addObject", &json!({"pos": g})).unwrap();
+        s.run("arrange.group", &json!({})).unwrap();
+        let Some((pos, InlineObject::Group { children, .. })) = selected(&s) else { panic!("no group") };
+        let fills: Vec<Option<Rgb>> = children
+            .iter()
+            .map(|c| match &c.obj {
+                InlineObject::Shape { fill, .. } => *fill,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, [Some(Rgb(0, 255, 0)), Some(Rgb(255, 0, 0))], "green, behind the text, under red");
+        // Numbered red 1, green 2, blue 3: the group takes red's.
+        assert_eq!(z_of(&s, &pos), Some((Wrap::InFrontOfText, 1)));
+    }
+
+    /// #2956: grouping objects with no order of their own numbers the story first, so an object
+    /// stacked between the members stays under the group's top member.
+    #[test]
+    fn group_of_unordered_objects_stays_above_what_was_under_its_top() {
+        let mut s = three_shapes();
+        s.run("select.addObject", &json!({"pos": shape_at(&s, 'b')})).unwrap();
+        s.run("arrange.group", &json!({})).unwrap();
+        let (group, _) = selected(&s).unwrap();
+        let (green, blue_group) = (z_of(&s, &shape_at(&s, 'g')).unwrap().1, z_of(&s, &group).unwrap().1);
+        assert!(green > 0 && blue_group > green, "green {green} stays under the group {blue_group}");
     }
 }

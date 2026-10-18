@@ -204,6 +204,8 @@ pub(crate) fn add(ctx: &mut Ctx, lay: &mut DocLayout) {
         }
         let mut next = top_min;
         let x0 = pw + SIDE;
+        // Leaders and cards are drawn over every object on the page.
+        page.items.push(Placed::StackStart { key: Box::new(crate::stack::StackKey::markup()) });
         for (c, t) in list.into_iter().zip(tops) {
             let top = t.max(next);
             // No room left beside this page (dozens of comments on it): the rest are left out
@@ -231,5 +233,6 @@ pub(crate) fn add(ctx: &mut Ctx, lay: &mut DocLayout) {
                 page.items.push(it);
             }
         }
+        page.items.push(Placed::StackEnd);
     }
 }

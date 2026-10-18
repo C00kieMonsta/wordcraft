@@ -2696,3 +2696,8 @@ preview	Title	Пример
 	Type a size in any unit, such as 5 cm or 300 px. The other side follows, so the picture keeps its proportions.	Введите размер в любых единицах, например 5 cm или 300 px. Другая сторона изменится вместе с ней, и рисунок сохранит пропорции.
 
 	Import…	Импорт…
+	Bring to Front	На передний план
+	Bring in Front of Text	Поместить перед текстом
+	Send to Back	На задний план
+	Send Behind Text	Поместить за текстом
+	select a floating picture or shape first	сначала выделите плавающий рисунок или фигуру

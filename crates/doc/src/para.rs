@@ -220,6 +220,10 @@ pub struct Float {
     /// off, any VML shape in a header or footer): a picture watermark in a header that starts with a table.
     #[serde(skip_serializing_if = "is_false")]
     pub outside_cell: bool,
+    /// Stacking order among floating objects (`wp:anchor/@relativeHeight`): higher is drawn on
+    /// top. 0 = none, which stacks above every object that has one (see [`Float::stack_key`]).
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub z: u32,
 }
 
 /// Longest alternative text kept (characters): hostile files and commands are capped.
@@ -259,8 +263,21 @@ fn is_zero(v: &f32) -> bool {
 fn is_false(v: &bool) -> bool {
     !*v
 }
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+/// [`Float::stack_key`] for stacking order `z`.
+pub fn stack_key(z: u32) -> (bool, u32) {
+    (z == 0, z)
+}
 
 impl Float {
+    /// Sorts floating objects bottom to top within their layer: by [`Float::z`], objects
+    /// without one above those with one. Ties go by document order.
+    pub fn stack_key(&self) -> (bool, u32) {
+        stack_key(self.z)
+    }
     /// The rotation and flips, the angle normalised to `0..360` (a NaN angle is no rotation).
     pub fn spin(&self) -> wordcraft_geom::Spin {
         wordcraft_geom::Spin::new(self.rot, self.flip_h, self.flip_v)

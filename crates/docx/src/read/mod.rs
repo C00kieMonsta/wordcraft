@@ -291,6 +291,7 @@ pub(crate) fn read_opened(pkg: &Package) -> Result<Document, DocxError> {
         keep_glued_ids(&mut r.doc, &r.glued);
     }
     let mut doc = r.doc;
+    doc.settle_stacking();
     doc.ensure_nonempty();
     Ok(doc)
 }

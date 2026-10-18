@@ -17,6 +17,7 @@ pub mod kinsoku;
 pub mod math;
 pub mod outline;
 pub mod para;
+pub mod stack;
 pub mod styleref;
 mod table;
 mod textbox;
@@ -327,7 +328,15 @@ pub enum Placed {
         /// Its paragraph's column left and top: where offsets relative to the column and the
         /// paragraph (`Anchor::Column` / `Anchor::Paragraph`) start.
         origin: wordcraft_geom::Point,
+        /// Its stacking order ([`Float::z`]).
+        z: u32,
     },
+    /// The start of a floating object's items, up to the matching [`Placed::StackEnd`]: they are
+    /// drawn in stacking order, not where they sit in the list (see [`stack::order`]).
+    StackStart {
+        key: Box<stack::StackKey>,
+    },
+    StackEnd,
 }
 
 impl Placed {
@@ -364,6 +373,7 @@ impl Placed {
                 *y0 += dy;
                 *y1 += dy;
             }
+            Placed::StackStart { .. } | Placed::StackEnd => {}
         }
     }
 
@@ -415,6 +425,7 @@ impl Placed {
                 (*x0, *y0) = turn_point(turn, x, y, *x0, *y0);
                 (*x1, *y1) = turn_point(turn, x, y, *x1, *y1);
             }
+            Placed::StackStart { .. } | Placed::StackEnd => {}
         }
     }
 }
@@ -1735,6 +1746,7 @@ fn v_span(it: &Placed) -> (f32, f32) {
         | Placed::Cell { rect, .. }
         | Placed::Object { rect, .. } => (rect.y, rect.y + rect.h),
         Placed::Rule { y0, y1, .. } => (y0.min(*y1), y0.max(*y1)),
+        Placed::StackStart { .. } | Placed::StackEnd => (0.0, 0.0),
     }
 }
 
@@ -3254,11 +3266,6 @@ fn place_objects(
                 let cx = x + line.cl_left(k).unwrap_or(0.0);
                 display::inline_rect(Some(obj), cx, y + (line.baseline - fl.top), c.adv, c.obj_h)
             };
-            let layer = if float.wrap == Wrap::BehindText { &mut behind } else { &mut front };
-            // Floating ones are drawn here; inline ones with their line.
-            if floating {
-                layer.extend(float_items(obj, rect, (Spin::default(), Point::default()), story, path, c.start));
-            }
             let text_box = match obj {
                 InlineObject::Shape { story: Some(id), .. } if ctx.doc.parts.get(id).is_some_and(|p| p.kind == wordcraft_doc::PartKind::TextBox) => {
                     Some(*id)
@@ -3267,7 +3274,7 @@ fn place_objects(
             };
             // A box linked from another shows (and edits) that box's story.
             let shown = text_box.map(|id| textbox::shown_story(ctx, id));
-            front.push(Placed::Object {
+            let area = Placed::Object {
                 rect,
                 spin: float.spin(),
                 story,
@@ -3276,7 +3283,19 @@ fn place_objects(
                 text_box: shown,
                 wrap: float.wrap,
                 origin: Point::new(at.col.0, at.para_y),
-            });
+                z: float.z,
+            };
+            // Floating ones are drawn here, in stacking order, their area with them so the one on
+            // top is hit first; inline ones with their line.
+            if floating {
+                let layer = if float.wrap == Wrap::BehindText { &mut behind } else { &mut front };
+                let key = stack::StackKey::new(float, wordcraft_doc::Pos { story, path: Path(path.to_vec()), off: c.start });
+                layer.push(Placed::StackStart { key: Box::new(key) });
+                layer.extend(float_items(obj, rect, (Spin::default(), Point::default()), story, path, c.start));
+                layer.push(area);
+            } else {
+                front.push(area);
+            }
             // Its text (a group: its text boxes', each where the group's turn carries it; the
             // text itself stays upright), unless the box budget says no (a box inside itself,
             // too deep, too many).
@@ -3292,10 +3311,17 @@ fn place_objects(
                     .collect(),
                 _ => text_box.map(|id| (id, rect)).into_iter().collect(),
             };
+            let layer = if float.wrap == Wrap::BehindText { &mut behind } else { &mut front };
             for (id, rect) in boxes {
-                let items = textbox::box_items(ctx, id, rect, depth);
-                let layer = if float.wrap == Wrap::BehindText { &mut behind } else { &mut front };
+                let mut items = textbox::box_items(ctx, id, rect, depth);
+                // An inline box is drawn with its line: what floats in it keeps the box's place.
+                if !floating {
+                    items.retain(|it| !matches!(it, Placed::StackStart { .. } | Placed::StackEnd));
+                }
                 layer.extend(items);
+            }
+            if floating {
+                layer.push(Placed::StackEnd);
             }
             // Placed on the page from a header or footer cell: drawn with the header, once.
             if pinned.is_some() {
@@ -4323,6 +4349,7 @@ fn placed_intersects(item: &Placed, rect: &Rect) -> bool {
         | Placed::Object { rect: bounds, .. }
         | Placed::Clip { rect: bounds, .. } => bounds.intersects(rect),
         Placed::Rule { x0, y0, x1, y1, .. } => Rect::new(x0.min(*x1), y0.min(*y1), (x1 - x0).abs(), (y1 - y0).abs()).intersects(rect),
+        Placed::StackStart { .. } | Placed::StackEnd => false,
     }
 }
 

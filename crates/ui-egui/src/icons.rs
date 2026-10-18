@@ -702,6 +702,26 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32, accent: Color32) {
             pen.frect(3.0, 3.0, 12.0, 12.0, a);
             pen.rect(8.0, 8.0, 17.0, 17.0, c);
         }
+        // Stacking order: the accent square over two others, or showing between them.
+        "bringToFront" => {
+            pen.rect(2.0, 2.0, 10.0, 10.0, c);
+            pen.rect(10.0, 10.0, 18.0, 18.0, c);
+            pen.frect(5.0, 5.0, 15.0, 15.0, a);
+        }
+        "sendToBack" => {
+            pen.frect(10.0, 5.0, 15.0, 10.0, a);
+            pen.frect(5.0, 10.0, 10.0, 15.0, a);
+            pen.rect(2.0, 2.0, 10.0, 10.0, c);
+            pen.rect(10.0, 10.0, 18.0, 18.0, c);
+        }
+        "bringInFrontOfText" => {
+            pen.lines(2.0, 18.0, &[4.0, 8.0, 12.0, 16.0]);
+            pen.frect(6.0, 6.0, 14.0, 14.0, a);
+        }
+        "sendBehindText" => {
+            pen.frect(6.0, 6.0, 14.0, 14.0, a);
+            pen.lines(2.0, 18.0, &[4.0, 8.0, 12.0, 16.0]);
+        }
         "selectionPane" => {
             pen.rect(3.0, 3.0, 17.0, 17.0, c);
             pen.lines(6.0, 14.0, &[7.0, 10.0, 13.0]);

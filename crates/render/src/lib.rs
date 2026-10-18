@@ -564,15 +564,14 @@ fn blend_backgrounds(items: &[Draw], p: wordcraft_geom::Point, opts: &RenderOpti
     for it in items {
         let (color, alpha) = match it {
             Draw::Fill { rect, color, alpha, .. } if rect.contains(p) => (*color, *alpha),
-            // The shape's own outline (an ellipse's corners are not inside it). Shape fills are
-            // drawn opaque (the model has no fill transparency), so they cover what's beneath.
-            Draw::Shape { rect, kind, fill: Some(fill), corner, .. }
+            // The shape's own outline (an ellipse's corners are not inside it), at the fill's opacity.
+            Draw::Shape { rect, kind, fill: Some(fill), corner, fill_alpha, .. }
                 if *kind != ShapeKind::Line && rect.contains(p) && {
                     let r = kurbo::Rect::new(rect.x as f64, rect.y as f64, rect.right() as f64, rect.bottom() as f64);
                     kurbo::Shape::contains(&shape_path(*kind, r, *corner), kurbo::Point::new(p.x as f64, p.y as f64))
                 } =>
             {
-                (*fill, 1.0)
+                (*fill, *fill_alpha)
             }
             Draw::Clip { rect, items } if rect.contains(p) => {
                 blend_backgrounds(items, p, opts, bg, depth + 1);
@@ -894,14 +893,14 @@ fn draw(ctx: &mut RenderContext, doc: &Document, it: &Draw, view: Affine, visibl
                 ctx.pop_layer();
             }
         }
-        Draw::Path { segs, fill, stroke, stroke_width, dash } => {
+        Draw::Path { segs, fill, stroke, stroke_width, dash, fill_alpha } => {
             let path = wordcraft_layout::display::seg_path(segs);
             if path.elements().is_empty() {
                 return;
             }
             ctx.set_transform(view);
             if let Some(f) = fill {
-                ctx.set_paint(color(opts.ink(*f), 1.0));
+                ctx.set_paint(color(opts.ink(*f), *fill_alpha));
                 ctx.fill_path(&path);
             }
             if let Some(s) = stroke {
@@ -951,7 +950,7 @@ fn draw(ctx: &mut RenderContext, doc: &Document, it: &Draw, view: Affine, visibl
             ctx.set_stroke(kurbo::Stroke::new(w as f64).with_caps(kurbo::Cap::Round).with_join(kurbo::Join::Round));
             ctx.stroke_path(&path);
         }
-        Draw::Shape { rect, kind, fill, stroke, stroke_width, effects, corner, dash } => {
+        Draw::Shape { rect, kind, fill, stroke, stroke_width, effects, corner, dash, fill_alpha } => {
             let r = kurbo::Rect::new(rect.x as f64, rect.y as f64, rect.right() as f64, rect.bottom() as f64);
             let path = shape_path(*kind, r, *corner);
             ctx.set_transform(view);
@@ -993,14 +992,14 @@ fn draw(ctx: &mut RenderContext, doc: &Document, it: &Draw, view: Affine, visibl
                 for (g, a) in wordcraft_doc::effects::bands(-rad, 0.0, 1.0) {
                     let rr = r.inflate(g as f64, g as f64);
                     if rr.width() > 0.0 && rr.height() > 0.0 {
-                        ctx.set_paint(color(opts.ink(*f), a));
+                        ctx.set_paint(color(opts.ink(*f), a * fill_alpha));
                         ctx.fill_path(&shape_path(*kind, rr, *corner));
                     }
                 }
                 return;
             }
             if let Some(f) = fill {
-                ctx.set_paint(color(opts.ink(*f), 1.0));
+                ctx.set_paint(color(opts.ink(*f), *fill_alpha));
                 ctx.fill_path(&path);
             }
             if let Some(s) = stroke {
@@ -1282,6 +1281,7 @@ mod tests {
             effects: Default::default(),
             corner: None,
             dash: Vec::new(),
+            fill_alpha: 1.0,
         };
         let at = |x: f32, y: f32| {
             let mut bg = [255.0; 3];
@@ -1402,6 +1402,58 @@ mod tests {
     /// Ink in a raster: the sum of how far each pixel is from white.
     fn ink(img: &Rendered) -> u64 {
         img.pixels.as_chunks::<4>().0.iter().map(|p| 255 - p[0] as u64).sum()
+    }
+
+    /// #2956: a shape's fill transparency shows what is beneath it, the shape below or the paper,
+    /// and the stacking order decides which shape covers the other.
+    #[test]
+    fn transparent_fill_shows_what_is_beneath() {
+        use wordcraft_doc::para::{Anchor, Float, InlineObject, Wrap};
+        let shape = |fill: Rgb, x: f32, z: u32, transparency: f32| InlineObject::Shape {
+            kind: ShapeKind::Rectangle,
+            w: 100.0,
+            h: 100.0,
+            fill: Some(fill),
+            stroke: None,
+            stroke_width: 0.0,
+            float: Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x, y: x, z, ..Default::default() },
+            story: None,
+            freeform: None,
+            effects: Default::default(),
+            extra: wordcraft_doc::connector::ShapeExtra { fill_transparency: transparency, ..Default::default() },
+        };
+        let draw = |blue_z: u32, red_z: u32| {
+            let mut d = Document::from_text("");
+            let at = wordcraft_doc::Pos::body(0, 0);
+            d.insert_object(&at, shape(Rgb(0, 0, 255), 100.0, blue_z, 0.0), &Default::default()).unwrap();
+            let after = wordcraft_doc::Pos::body(0, wordcraft_doc::para::OBJ.len_utf8());
+            d.insert_object(&after, shape(Rgb(255, 0, 0), 150.0, red_z, 50.0), &Default::default()).unwrap();
+            let l = layout(&d, &mut LayoutCache::new(), &LayoutOptions::default());
+            render_page(&d, &l.pages[0], 1.0, &RenderOptions::default())
+        };
+        let near = |got: [u8; 4], want: [u8; 3]| got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 3);
+        let img = draw(0, 0);
+        assert!(near(img.pixel(125, 125), [0, 0, 255]), "blue alone: {:?}", img.pixel(125, 125));
+        assert!(near(img.pixel(175, 175), [128, 0, 128]), "half red over blue: {:?}", img.pixel(175, 175));
+        assert!(near(img.pixel(225, 225), [255, 128, 128]), "half red over the paper: {:?}", img.pixel(225, 225));
+        // Blue brought to the front covers the red where they overlap.
+        let img = draw(2, 1);
+        assert!(near(img.pixel(175, 175), [0, 0, 255]), "blue on top: {:?}", img.pixel(175, 175));
+        // The caret's background blends the fill at its opacity.
+        let half = Draw::Shape {
+            rect: wordcraft_geom::Rect::new(0.0, 0.0, 10.0, 10.0),
+            kind: ShapeKind::Rectangle,
+            fill: Some(Rgb::BLACK),
+            stroke: None,
+            stroke_width: 0.0,
+            effects: Default::default(),
+            corner: None,
+            dash: Vec::new(),
+            fill_alpha: 0.5,
+        };
+        let mut bg = [255.0; 3];
+        blend_backgrounds(std::slice::from_ref(&half), wordcraft_geom::Point::new(5.0, 5.0), &RenderOptions::default(), &mut bg, 0);
+        assert_eq!(bg, [127.5; 3]);
     }
 
     #[test]

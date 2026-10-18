@@ -1257,6 +1257,53 @@ fn header_cell_picture_placed_on_the_page() {
     }
 }
 
+/// #2956: a VML shape's `z-index` is its stacking order, in the scale of DrawingML's
+/// `relativeHeight` (a behind-text `z-index` of -251657216 is 251659264). A header with a VML
+/// picture watermark and then a DrawingML picture, both behind the text: the watermark is below a
+/// picture with a higher order and above one with a lower order, whatever their document order,
+/// whether or not the file's orders are kept (they are when another story's aren't in document
+/// order), and after saving and reopening.
+#[test]
+fn a_vml_watermark_and_a_drawingml_picture_stack_by_their_orders() {
+    let vml = r##"<w:r><w:pict><v:shape id="WordPictureWatermark1" type="#_x0000_t75" style="position:absolute;margin-left:0;margin-top:0;width:300pt;height:200pt;z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin"><v:imagedata r:id="rIdP"/></v:shape></w:pict></w:r>"##;
+    let anchor = |z: u32, id: u32| {
+        format!(
+            r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="{z}" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>center</wp:align></wp:positionH><wp:positionV relativeFrom="margin"><wp:align>center</wp:align></wp:positionV><wp:extent cx="1270000" cy="1270000"/><wp:wrapNone/><wp:docPr id="{id}" name="Picture {id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{id}" name="p.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdP"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+        )
+    };
+    // The header's stacking keys in document order.
+    let keys = |d: &Document| -> Vec<(bool, u32)> {
+        let hid = d.last_section.headers.default.unwrap();
+        d.parts[&hid]
+            .blocks
+            .iter()
+            .filter_map(|b| b.as_para())
+            .flat_map(|p| p.objects.iter().filter_map(|o| o.frame()).map(|(_, _, f)| f.stack_key()))
+            .collect()
+    };
+    // Whether the first object (the watermark) is drawn below the second: ties go by document order.
+    let below = |k: &[(bool, u32)]| k.len() == 2 && k[0] <= k[1];
+    // Body pictures stacked against document order make the file's orders kept.
+    let unordered = format!("{}{}", anchor(9, 10), anchor(4, 11));
+    for body_floats in ["", unordered.as_str()] {
+        for (picture_z, watermark_below) in [(251_660_288, true), (251_658_240, false)] {
+            let hdr = format!(r#"<w:hdr {W_NS}><w:p>{vml}{}<w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#, anchor(picture_z, 1));
+            let hrels = rels(&[("rIdP", "image", "media/p.png")]);
+            let body = format!(
+                r#"<w:p>{body_floats}<w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>"#
+            );
+            let parts =
+                [("word/header1.xml", hdr.as_str()), ("word/_rels/header1.xml.rels", hrels.as_str()), ("word/media/p.png", "\u{89}PNG stand-in")];
+            let d = wordcraft_docx::read(&docx(&body, &[("rIdH", "header", "header1.xml"), ("rIdP", "image", "media/p.png")], &parts)).unwrap();
+            let k = keys(&d);
+            assert_eq!(below(k.as_slice()), watermark_below, "{k:?} (picture {picture_z}, body: {body_floats:?})");
+            let d2 = wordcraft_docx::read(&wordcraft_docx::write(&d).unwrap()).unwrap();
+            let k = keys(&d2);
+            assert_eq!(below(k.as_slice()), watermark_below, "saved: {k:?} (picture {picture_z})");
+        }
+    }
+}
+
 /// Issue #1775: only header and footer shapes are placed on the page from a cell (what was checked
 /// in Word); a VML picture in a body table cell stays laid out in its cell.
 #[test]

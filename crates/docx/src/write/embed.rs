@@ -432,6 +432,10 @@ impl super::Writer<'_> {
         if depth > MAX_DEPTH {
             return;
         }
+        // An object restacked here: its own order (one never arranged keeps the file's).
+        if e.name == "wp:anchor" && float.z > 0 {
+            set_attr(e, "relativeHeight", &float.z.to_string());
+        }
         match e.name.as_str() {
             "v:shape" => {
                 if let Some((_, style)) = e.attrs.iter_mut().find(|(k, _)| k == "style") {
@@ -649,19 +653,24 @@ fn vml_style_with(style: &str, w: f32, h: f32, float: &Float) -> String {
         .split(';')
         .filter_map(|d| d.split_once(':'))
         .any(|(k, v)| k.trim().eq_ignore_ascii_case("position") && v.trim().eq_ignore_ascii_case("absolute"));
+    let stacked = absolute && float.z > 0;
     let mut out: Vec<String> = style
         .split(';')
         .filter(|d| {
             let key = d.split_once(':').map_or("", |(k, _)| k).trim().to_ascii_lowercase();
             !(d.trim().is_empty()
                 || matches!(key.as_str(), "width" | "height" | "rotation" | "flip")
-                || (absolute && matches!(key.as_str(), "left" | "top" | "margin-left" | "margin-top")))
+                || (absolute && matches!(key.as_str(), "left" | "top" | "margin-left" | "margin-top"))
+                || (stacked && key == "z-index"))
         })
         .map(|d| d.trim().to_string())
         .collect();
     if absolute {
         out.push(format!("margin-left:{}pt", pt(float.x)));
         out.push(format!("margin-top:{}pt", pt(float.y)));
+    }
+    if stacked {
+        out.push(format!("z-index:{}", crate::units::vml_z_index(float.z, float.wrap == wordcraft_doc::para::Wrap::BehindText)));
     }
     out.push(format!("width:{}pt", pt(w.max(0.0))));
     out.push(format!("height:{}pt", pt(h.max(0.0))));
@@ -713,5 +722,19 @@ mod tests {
         assert_eq!(s, "z-index:3;width:2pt;height:3pt;rotation:329.5;flip:x y");
         // Unturned: no rotation or flip left behind.
         assert_eq!(vml_style_with("rotation:90;flip:y;width:1pt", 2.0, 3.0, &Float::default()), "width:2pt;height:3pt");
+    }
+
+    /// #2956: a restacked floating OLE object takes its new order into its VML `z-index`; one
+    /// never arranged keeps the file's.
+    #[test]
+    fn vml_style_takes_the_stacking_order() {
+        use wordcraft_doc::para::Wrap;
+        let style = "position:absolute;z-index:-251657216;width:1pt;height:1pt";
+        let kept = vml_style_with(style, 1.0, 1.0, &Float { wrap: Wrap::BehindText, ..Float::default() });
+        assert!(kept.contains("z-index:-251657216"), "{kept}");
+        let behind = vml_style_with(style, 1.0, 1.0, &Float { wrap: Wrap::BehindText, z: 251_659_264, ..Float::default() });
+        assert!(behind.contains("z-index:-251657216") && behind.matches("z-index").count() == 1, "{behind}");
+        let front = vml_style_with(style, 1.0, 1.0, &Float { wrap: Wrap::InFrontOfText, z: 7, ..Float::default() });
+        assert!(front.contains("z-index:7") && front.matches("z-index").count() == 1, "{front}");
     }
 }

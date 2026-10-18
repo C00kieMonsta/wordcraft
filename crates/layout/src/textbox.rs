@@ -182,6 +182,7 @@ fn extent(items: &[Placed]) -> f32 {
             | Placed::Clip { rect, .. }
             | Placed::Cell { rect, .. }
             | Placed::Object { rect, .. } => rect.bottom(),
+            Placed::StackStart { .. } | Placed::StackEnd => continue,
         };
         if b.is_finite() {
             bottom = bottom.max(b);

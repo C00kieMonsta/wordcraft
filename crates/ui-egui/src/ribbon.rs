@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::colors::{Remember, Target};
 use crate::options::MeasureExt;
 use crate::theme::{Tokens, medium, regular, semibold};
-use crate::widgets::{CONTENT_H, LABEL_H, big, big_toggle, group, menu_button, small, split};
+use crate::widgets::{CONTENT_H, LABEL_H, big, big_toggle, group, menu_button, small, split, split_labeled};
 use crate::{WordApp, icons};
 
 pub const TABS: [&str; 13] = wordcraft_engine::ribbon::TABS;
@@ -1722,8 +1722,7 @@ fn layout(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "position", "Position", "arrange.position", json!({}), false);
         wrap_menu(ui, app);
         stack(ui, |ui| {
-            small(ui, app, "bringForward", Some("Bring Forward"), "Bring Forward", "arrange.bringForward", json!({}), false);
-            small(ui, app, "sendBackward", Some("Send Backward"), "Send Backward", "arrange.sendBackward", json!({}), false);
+            order_buttons(ui, app);
             small(ui, app, "selectionPane", Some("Selection Pane"), "Selection Pane", "arrange.selectionPane", json!({}), false);
         });
         stack(ui, |ui| {
@@ -1766,6 +1765,51 @@ fn wrap_menu(ui: &mut Ui, app: &mut WordApp) {
             }
         });
     });
+}
+
+/// Arrange › Bring Forward and Send Backward: one step up or down the stacking order; their
+/// menus go to the top or bottom, or across the text.
+fn order_buttons(ui: &mut Ui, app: &mut WordApp) {
+    for (front, icon, label, id) in
+        [(true, "bringForward", "Bring Forward", "arrange.bringForward"), (false, "sendBackward", "Send Backward", "arrange.sendBackward")]
+    {
+        crate::widgets::row(ui, |ui| {
+            split_labeled(ui, app, icon, Some(label), label, id, json!({}), false, None, |ui, app| order_items(ui, app, front, false))
+        });
+    }
+}
+
+/// The stacking order items toward the front (`front`) or the back: as the ribbon menu lists
+/// them (the one-step move first), or as the right-click menu does (the move to the end first).
+fn order_items(ui: &mut Ui, app: &mut WordApp, front: bool, context: bool) {
+    // The icon items fill the width they are given: keep the menu narrow.
+    ui.set_max_width(240.0);
+    let items = if front {
+        [
+            ("bringForward", "Bring Forward", "arrange.bringForward"),
+            ("bringToFront", "Bring to Front", "arrange.bringToFront"),
+            ("bringInFrontOfText", "Bring in Front of Text", "arrange.bringInFrontOfText"),
+        ]
+    } else {
+        [
+            ("sendBackward", "Send Backward", "arrange.sendBackward"),
+            ("sendToBack", "Send to Back", "arrange.sendToBack"),
+            ("sendBehindText", "Send Behind Text", "arrange.sendBehindText"),
+        ]
+    };
+    let order = if context { [1, 0, 2] } else { [0, 1, 2] };
+    for (icon, label, id) in order.into_iter().filter_map(|i| items.get(i).copied()) {
+        mi_icon(ui, app, icon, label, id, json!({}));
+    }
+}
+
+/// The right-click menu's Bring to Front and Send to Back submenus for a selected object.
+/// Greyed for an object in line with the text, as in Word.
+pub(crate) fn order_menus(ui: &mut Ui, app: &mut WordApp) {
+    let floating = crate::widgets::enabled(app, "arrange.bringToFront");
+    for (front, label) in [(true, "Bring to Front"), (false, "Send to Back")] {
+        ui.add_enabled_ui(floating, |ui| ui.menu_button(tl!(label), |ui| order_items(ui, app, front, true)));
+    }
 }
 
 fn rotate_menu(ui: &mut Ui, app: &mut WordApp, label: Option<&str>) {
@@ -2351,11 +2395,30 @@ fn chart_design(app: &mut WordApp, ui: &mut Ui) {
     });
 }
 
+/// Shape Fill › Transparency: presets, then the exact value (a drag is one undo step). The
+/// colour stays.
+fn transparency_items(ui: &mut Ui, app: &mut WordApp, current: f32) {
+    for v in [0.0f32, 25.0, 50.0, 75.0] {
+        mi_check(ui, app, &format!("{v:.0}%"), (current - v).abs() < 0.5, "shape.fill", json!({"transparency": v}));
+    }
+    ui.separator();
+    let mut v = f64::from(current);
+    let r = ui.add(egui::DragValue::new(&mut v).speed(1.0).range(0.0..=100.0).max_decimals(0).suffix("%"));
+    if r.changed() {
+        if r.dragged() && !r.drag_started() {
+            app.session.join_next_undo();
+        }
+        let _ = app.run("shape.fill", json!({"transparency": v}));
+    }
+}
+
 /// Shape Format: fill, outline and effects of the selected shape, and its arrangement.
 fn shape_format(app: &mut WordApp, ui: &mut Ui) {
-    let (stroke, glow_size) = match wordcraft_engine::cmd::objects::selected(&app.session) {
-        Some((_, wordcraft_doc::para::InlineObject::Shape { stroke, effects, .. })) => (stroke, effects.glow.map(|g| g.size)),
-        _ => (None, None),
+    let (stroke, glow_size, fill_transparency) = match wordcraft_engine::cmd::objects::selected(&app.session) {
+        Some((_, wordcraft_doc::para::InlineObject::Shape { stroke, effects, extra, .. })) => {
+            (stroke, effects.glow.map(|g| g.size), Some(extra.fill_transparency))
+        }
+        _ => (None, None, None),
     };
     let theme = app.session.doc.settings.theme_colors.clone();
     group(ui, "Shape Styles", None, app, |ui, app| {
@@ -2363,6 +2426,10 @@ fn shape_format(app: &mut WordApp, ui: &mut Ui) {
             menu_button(ui, app, "shading", Some("Shape Fill"), "Shape Fill", false, "shape.fill", |ui, app| {
                 mi(ui, app, "No Color", "shape.fill", json!({"color": null}));
                 crate::colors::menu(ui, app, &theme, Target::cmd("shape.fill"));
+                if let Some(t) = fill_transparency {
+                    ui.separator();
+                    ui.menu_button(tl!("Transparency"), |ui| transparency_items(ui, app, t));
+                }
             });
             menu_button(ui, app, "pen", Some("Shape Outline"), "Shape Outline", false, "shape.outline", |ui, app| {
                 mi(ui, app, "No Color", "shape.outline", json!({"color": null}));
@@ -2413,6 +2480,7 @@ fn shape_format(app: &mut WordApp, ui: &mut Ui) {
     group(ui, "Arrange", None, app, |ui, app| {
         big(ui, app, "position", "Position", "arrange.position", json!({}), false);
         wrap_menu(ui, app);
+        stack(ui, |ui| order_buttons(ui, app));
         stack(ui, |ui| {
             rotate_menu(ui, app, Some("Rotate"));
             small(ui, app, "align", Some("Align"), "Align", "arrange.align", json!({}), false);
@@ -2589,6 +2657,7 @@ fn picture_format(app: &mut WordApp, ui: &mut Ui) {
     group(ui, "Arrange", None, app, |ui, app| {
         big(ui, app, "position", "Position", "arrange.position", json!({}), false);
         wrap_menu(ui, app);
+        stack(ui, |ui| order_buttons(ui, app));
         stack(ui, |ui| {
             rotate_menu(ui, app, Some("Rotate"));
             small(ui, app, "align", Some("Align"), "Align", "arrange.align", json!({}), false);
@@ -3077,6 +3146,47 @@ mod tests {
         s.run("select.collapse", &json!({"end": true})).unwrap();
         s.run("text.insert", &json!({"text": "x"})).unwrap();
         assert!(!has_picture_selected(&s));
+    }
+
+    /// #2956: Shape Format › Arrange's Send Backward and Bring Forward split buttons: the button
+    /// steps once, the arrow's menu goes to the ends; Shape Fill › Transparency keeps the colour.
+    #[test]
+    fn shape_format_arranges_the_stacking_order_and_fill_transparency() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let (mut h, red, green) = crate::canvas::tests::two_shapes_window();
+        let end = |p: &wordcraft_doc::Pos| wordcraft_doc::Pos { off: p.off + wordcraft_doc::para::OBJ.len_utf8(), ..p.clone() };
+        h.state_mut().run("select.range", json!({"anchor": green, "focus": end(&green)})).unwrap();
+        h.state_mut().run("ui.tab", json!({"tab": "Shape Format"})).unwrap();
+        h.run_steps(4);
+        let top = |h: &mut crate::table_resize::tests::H| h.state_mut().session.layout().object_at(0, 225.0, 225.0, 0.0).map(|o| o.pos());
+        assert_eq!(top(&mut h), Some(green.clone()));
+        h.get_by_role_and_label(Role::Button, "Send Backward").click();
+        h.run_steps(3);
+        assert_eq!(top(&mut h), Some(red.clone()), "green went one step down, under red");
+        let r = h.get_by_role_and_label(Role::Button, "Bring Forward").rect();
+        let arrow = egui::pos2(r.max.x + 6.5, r.center().y);
+        for pressed in [true, false] {
+            h.hover_at(arrow);
+            h.event(egui::Event::PointerButton { pos: arrow, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.run_steps(3);
+        assert!(h.query_by_label("Bring in Front of Text").is_some(), "the menu crosses the text too");
+        h.get_by_label("Bring to Front").click();
+        h.run_steps(3);
+        assert_eq!(top(&mut h), Some(green.clone()), "green is on top again");
+        // Shape Fill › Transparency › 50%.
+        h.get_by_role_and_label(Role::Button, "Shape Fill").click();
+        h.run_steps(2);
+        h.get_by_label_contains("Transparency").hover();
+        h.run_steps(2);
+        h.get_by_label_contains("50%").click();
+        h.run_steps(2);
+        let fill = match wordcraft_engine::cmd::objects::selected(&h.state().session) {
+            Some((_, wordcraft_doc::para::InlineObject::Shape { fill, extra, .. })) => (fill, extra.fill_transparency),
+            _ => (None, -1.0),
+        };
+        assert_eq!(fill, (Some(wordcraft_doc::Rgb(30, 160, 60)), 50.0));
     }
 
     #[test]

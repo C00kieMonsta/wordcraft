@@ -83,12 +83,14 @@ pub enum Draw {
         effects: wordcraft_doc::effects::ShapeEffects,
         /// A rounded rectangle's corner ([`wordcraft_doc::connector::ShapeExtra::corner`]).
         corner: Option<u32>,
+        /// The fill's opacity, 0 to 1 (the outline stays opaque).
+        fill_alpha: f32,
     },
     /// An ink stroke: a line through `pts` (page points) with round ends and joins, `width`
     /// wide, in `color` at opacity `alpha`.
     Ink { pts: Vec<(f32, f32)>, color: Rgb, width: f32, alpha: f32 },
     /// A vector path (a chart's or diagram's polygons, slices, lines): filled, then stroked.
-    Path { segs: Vec<PathSeg>, fill: Option<Rgb>, stroke: Option<Rgb>, stroke_width: f32, dash: Vec<f32> },
+    Path { segs: Vec<PathSeg>, fill: Option<Rgb>, stroke: Option<Rgb>, stroke_width: f32, dash: Vec<f32>, fill_alpha: f32 },
     /// An inline chart or diagram's draws, as one figure with its alt text (for tagged PDF).
     Figure { alt: String, kind: GraphicKind, draws: Vec<Draw> },
     /// A formatting mark (¶ · → ↵) in the UI's mark colour, or in `color` (a tracked
@@ -416,7 +418,7 @@ pub fn page_display(doc: &Document, page: &Page, opts: &DisplayOptions) -> Vec<D
         let warps = warped_boxes(doc, items);
         let clips = clipped_cells(items);
         let mut done: Vec<u32> = Vec::new();
-        for it in items.iter() {
+        for it in crate::stack::stacked(items) {
             // The object being dragged is drawn by its preview instead: leave it out here.
             if hidden.as_ref().is_some_and(|h| h.hides(it)) {
                 continue;
@@ -666,7 +668,7 @@ fn item_in(doc: &Document, it: &Placed, opts: &DisplayOptions, alpha: f32, outer
             }
             spun(*spin, *rect, vec![Draw::Clip { rect: *rect, items: inner }], out)
         }
-        Placed::Cell { .. } | Placed::Object { .. } => {}
+        Placed::Cell { .. } | Placed::Object { .. } | Placed::StackStart { .. } | Placed::StackEnd => {}
         Placed::Lines { story, path, para, l0, l1, x, y, turn } if turn.is_turned() => {
             let mut items = Vec::new();
             lines(doc, *story, path, para, *l0, *l1, 0.0, 0.0, opts, alpha, *turn == TextDirection::Down, &mut items);
@@ -1169,6 +1171,7 @@ fn lines(
                 effects: Default::default(),
                 corner: None,
                 dash: Vec::new(),
+                fill_alpha: 1.0,
             });
         }
         // Ruby (Phonetic Guide) text over its base text, in runs of one style.
@@ -1392,10 +1395,11 @@ fn graphic_draws(doc: &Document, g: &Graphic, rect: Rect, alpha: f32) -> Vec<Dra
                 effects: Default::default(),
                 corner: None,
                 dash: Vec::new(),
+                fill_alpha: 1.0,
             }),
             GraphicItem::Path { segs, fill, stroke, stroke_width } => {
                 let segs = page_segs(segs, |x, y| (rect.x + x * sx, rect.y + y * sy));
-                out.push(Draw::Path { segs, fill: *fill, stroke: *stroke, stroke_width: stroke_width * k, dash: Vec::new() })
+                out.push(Draw::Path { segs, fill: *fill, stroke: *stroke, stroke_width: stroke_width * k, dash: Vec::new(), fill_alpha: 1.0 })
             }
             GraphicItem::Text { rect: r, .. } => out.extend(text_glyphs(doc, inside(r), it, alpha, k)),
             GraphicItem::Image { rect: r, media } => {
@@ -1471,7 +1475,17 @@ fn shape_draws(
         return;
     }
     let Some(f) = freeform.filter(|_| kind == ShapeKind::Freeform) else {
-        out.push(Draw::Shape { rect, kind, fill, stroke, stroke_width, effects, corner: extra.corner, dash: extra.dash.pattern(stroke_width) });
+        out.push(Draw::Shape {
+            rect,
+            kind,
+            fill,
+            stroke,
+            stroke_width,
+            effects,
+            corner: extra.corner,
+            dash: extra.dash.pattern(stroke_width),
+            fill_alpha: extra.fill_opacity(),
+        });
         return;
     };
     if f.is_ink() && opts.hide_ink {
@@ -1503,7 +1517,14 @@ fn shape_draws(
             segs.push(PathSeg::Close);
         }
         let width = path_stroke_width(width);
-        out.push(Draw::Path { segs, fill: if closed { fill } else { None }, stroke, stroke_width: width, dash: extra.dash.pattern(width) });
+        out.push(Draw::Path {
+            segs,
+            fill: if closed { fill } else { None },
+            stroke,
+            stroke_width: width,
+            dash: extra.dash.pattern(width),
+            fill_alpha: extra.fill_opacity(),
+        });
         if !closed
             && extra.arrow_end
             && let Some(color) = stroke
@@ -1536,7 +1557,7 @@ fn path_arrowhead(points: &[(f32, f32)], color: Rgb, stroke_width: f32) -> Optio
     let (bx, by) = (tip.0 - dx * len, tip.1 - dy * len);
     let (nx, ny) = (-dy * len * 0.45, dx * len * 0.45);
     let segs = vec![PathSeg::Move(tip.0, tip.1), PathSeg::Line(bx + nx, by + ny), PathSeg::Line(bx - nx, by - ny), PathSeg::Close];
-    Some(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0, dash: Vec::new() })
+    Some(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0, dash: Vec::new(), fill_alpha: 1.0 })
 }
 
 /// A line or connector at `rect` (its unflipped frame: flips are the frame's turn), with its
@@ -1563,9 +1584,19 @@ fn line_draws(
                 })
                 .collect();
             let width = path_stroke_width(stroke_width);
-            out.push(Draw::Path { segs, fill: None, stroke, stroke_width: width, dash: extra.dash.pattern(width) });
+            out.push(Draw::Path { segs, fill: None, stroke, stroke_width: width, dash: extra.dash.pattern(width), fill_alpha: 1.0 });
         }
-        None => out.push(Draw::Shape { rect, kind, fill: None, stroke, stroke_width, effects, corner: None, dash: extra.dash.pattern(stroke_width) }),
+        None => out.push(Draw::Shape {
+            rect,
+            kind,
+            fill: None,
+            stroke,
+            stroke_width,
+            effects,
+            corner: None,
+            dash: extra.dash.pattern(stroke_width),
+            fill_alpha: 1.0,
+        }),
     }
     let Some(color) = stroke else { return };
     // Our line runs from the bottom-left corner to the top-right; connectors from the top-left
@@ -1582,7 +1613,7 @@ fn line_draws(
         let (bx, by) = (tip.0 - dx * len, tip.1 - dy * len);
         let (nx, ny) = (-dy * len * 0.45, dx * len * 0.45);
         let segs = vec![PathSeg::Move(tip.0, tip.1), PathSeg::Line(bx + nx, by + ny), PathSeg::Line(bx - nx, by - ny), PathSeg::Close];
-        out.push(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0, dash: Vec::new() });
+        out.push(Draw::Path { segs, fill: Some(color), stroke: None, stroke_width: 0.0, dash: Vec::new(), fill_alpha: 1.0 });
     }
 }
 
@@ -1678,6 +1709,7 @@ pub fn check_box(frame: Rect, checked: bool, color: Rgb, alpha: f32, out: &mut V
         effects: Default::default(),
         corner: None,
         dash: Vec::new(),
+        fill_alpha: 1.0,
     });
     if checked {
         out.extend([line(l, t, r, b, 0.48), line(r, t, l, b, 0.48)]);
@@ -1800,6 +1832,7 @@ fn canvas_background(rect: Rect, c: &wordcraft_doc::para::CanvasStyle) -> Draw {
         effects: Default::default(),
         corner: None,
         dash: Vec::new(),
+        fill_alpha: 1.0,
     }
 }
 

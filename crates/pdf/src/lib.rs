@@ -175,6 +175,7 @@ fn write_attempt(doc: &Document, lay: &DocLayout, opts: &PdfOptions, pages: &[us
         vectors: HashMap::new(),
         tags: Vec::new(),
         tag_index: HashMap::new(),
+        tag_at: (0, 0, 0),
         links: Vec::new(),
         bookmarks: std::cell::OnceCell::new(),
     };
@@ -652,6 +653,9 @@ fn shape_path(kind: ShapeKind, r: &Rect, corner: Option<u32>) -> Option<Path> {
 struct TagEntry {
     kind: TagKind,
     children: Vec<Node>,
+    /// Where it comes in reading order: the page, the item on it (in list order, whatever order
+    /// the items are drawn in) and the order it was made in.
+    key: (usize, usize, usize),
 }
 
 struct Exporter<'a> {
@@ -671,6 +675,9 @@ struct Exporter<'a> {
     vectors: HashMap<String, Option<Arc<Vector>>>,
     tags: Vec<TagEntry>,
     tag_index: HashMap<(StoryRef, DocPath), usize>,
+    /// The page (counted from 1) and item being drawn, and how many entries were made: the
+    /// [`TagEntry::key`] of the next one.
+    tag_at: (usize, usize, usize),
     /// Link rectangles on the current page: (x0, y0, x1, y1, target).
     links: Vec<(f32, f32, f32, f32, String)>,
     /// Bookmark positions by name (the first of a name wins), gathered once: looking each internal
@@ -787,7 +794,8 @@ impl Exporter<'_> {
                 s.end_tagged();
                 let alt = alt.map(str::to_string).filter(|a| !a.is_empty()).or_else(|| Some("picture".to_string()));
                 let g = TagGroup::with_children(Tag::Figure(alt), vec![Node::Leaf(id)]);
-                self.tags.push(TagEntry { kind: Tag::Div.into(), children: vec![Node::Group(g)] });
+                let key = self.next_tag_key();
+                self.tags.push(TagEntry { kind: Tag::Div.into(), children: vec![Node::Group(g)], key });
             }
         }
     }
@@ -819,7 +827,7 @@ impl Exporter<'_> {
             placeholders: false,
             ..Default::default()
         };
-        for it in page.header.iter().chain(page.footer.iter()) {
+        for it in wordcraft_layout::stack::stacked(&page.header).chain(wordcraft_layout::stack::stacked(&page.footer)) {
             let draws = self.draws(page, it, &dopts);
             self.tagged(s, Role::Artifact(ArtifactType::Other), None, |me, s| {
                 for d in &draws {
@@ -827,7 +835,14 @@ impl Exporter<'_> {
                 }
             });
         }
-        for it in &page.items {
+        self.tag_at = (self.tag_at.0.saturating_add(1), 0, self.tag_at.2);
+        // Drawn in stacking order; the structure keeps list (reading) order.
+        for i in wordcraft_layout::stack::order(&page.items) {
+            let Some(it) = page.items.get(i) else { continue };
+            if matches!(it, Placed::StackStart { .. } | Placed::StackEnd) {
+                continue;
+            }
+            self.tag_at.1 = i;
             let draws = self.draws(page, it, &dopts);
             match it {
                 Placed::Lines { story, path, para, .. } => {
@@ -873,6 +888,8 @@ impl Exporter<'_> {
                         }
                     });
                 }
+                // Cells and object areas draw nothing: no empty artifact for them.
+                _ if draws.is_empty() => {}
                 _ => self.tagged(s, Role::Artifact(ArtifactType::Other), None, |me, s| {
                     for d in &draws {
                         me.draw(s, d);
@@ -918,15 +935,25 @@ impl Exporter<'_> {
             }
             _ => Tag::P.into(),
         };
-        self.tags.push(TagEntry { kind, children: Vec::new() });
+        let key = self.next_tag_key();
+        self.tags.push(TagEntry { kind, children: Vec::new(), key });
         let i = self.tags.len() - 1;
         self.tag_index.insert((story, path.clone()), i);
         i
     }
 
+    /// The [`TagEntry::key`] of an entry made now.
+    fn next_tag_key(&mut self) -> (usize, usize, usize) {
+        let key = self.tag_at;
+        self.tag_at.2 = self.tag_at.2.saturating_add(1);
+        key
+    }
+
     fn tag_tree(&mut self) -> TagTree {
         let mut tree = TagTree::new().with_lang(self.doc.styles.default_chr.lang.clone());
-        for e in std::mem::take(&mut self.tags) {
+        let mut tags = std::mem::take(&mut self.tags);
+        tags.sort_by_key(|e| e.key);
+        for e in tags {
             if e.children.is_empty() {
                 continue;
             }
@@ -958,11 +985,11 @@ impl Exporter<'_> {
             }
             Draw::Line { x0, y0, x1, y1, width, color, stroke, alpha, .. } => self.line(s, (*x0, *y0, *x1, *y1), *width, *color, *stroke, *alpha),
             Draw::Image { rect, media, crop, alpha, .. } => self.picture(s, rect, media, crop, *alpha),
-            Draw::Path { segs, fill: f, stroke, stroke_width, dash } => {
+            Draw::Path { segs, fill: f, stroke, stroke_width, dash, fill_alpha } => {
                 let mut pb = PathBuilder::new();
                 append_path(&mut pb, &wordcraft_layout::display::seg_path(segs));
                 let Some(p) = pb.finish() else { return };
-                s.set_fill(f.map(|c| fill(c, 1.0)));
+                s.set_fill(f.map(|c| fill(c, *fill_alpha)));
                 s.set_stroke(stroke.map(|c| Stroke {
                     paint: rgb::Color::new(c.0, c.1, c.2).into(),
                     // Width 0 (or none) is a hairline.
@@ -1006,7 +1033,7 @@ impl Exporter<'_> {
                 s.draw_path(&p);
                 s.set_stroke(None);
             }
-            Draw::Shape { rect, kind, fill: f, stroke, stroke_width, effects, corner, dash } => {
+            Draw::Shape { rect, kind, fill: f, stroke, stroke_width, effects, corner, dash, fill_alpha } => {
                 let Some(p) = shape_path(*kind, rect, *corner) else { return };
                 let can_fill = *kind != ShapeKind::Line;
                 let fx = effects.sanitized();
@@ -1019,14 +1046,14 @@ impl Exporter<'_> {
                     s.set_stroke(None);
                     for (g, a) in wordcraft_doc::effects::bands(-rad, 0.0, 1.0) {
                         if let Some(p) = shape_path(*kind, &grown(rect, g, 0.0, 0.0), *corner) {
-                            s.set_fill(Some(fill(*c, a)));
+                            s.set_fill(Some(fill(*c, a * fill_alpha)));
                             s.draw_path(&p);
                         }
                     }
                     s.set_fill(None);
                     return;
                 }
-                s.set_fill(f.filter(|_| can_fill).map(|c| fill(c, 1.0)));
+                s.set_fill(f.filter(|_| can_fill).map(|c| fill(c, *fill_alpha)));
                 s.set_stroke(stroke.map(|c| Stroke {
                     paint: rgb::Color::new(c.0, c.1, c.2).into(),
                     width: if stroke_width.is_finite() { stroke_width.clamp(0.25, 200.0) } else { 0.75 },

@@ -761,7 +761,9 @@ fn page_content_key(page: &Page) -> u64 {
                     format!("{spin:?}").hash(&mut h)
                 }
                 Placed::Clip { rect, spin, items } => format!("{rect:?}{spin:?}{items:?}").hash(&mut h),
-                Placed::Cell { .. } | Placed::Object { .. } => {}
+                // The stacking order: bringing an object forward changes only this.
+                Placed::StackStart { key } => format!("{key:?}").hash(&mut h),
+                Placed::Cell { .. } | Placed::Object { .. } | Placed::StackEnd => {}
             }
         }
     }
@@ -3179,6 +3181,7 @@ fn context_menu(app: &mut WordApp, ui: &mut Ui) {
     }
     if object {
         ui.menu_button(tl!("Wrap Text"), |ui| crate::ribbon::wrap_text_items(ui, app));
+        crate::ribbon::order_menus(ui, app);
     }
     if app.session.sel.focus.path.cell().is_some() {
         // The table's items follow what is selected, as in Word (2019, Windows).
@@ -3352,7 +3355,7 @@ fn is_followable_link(url: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::table_resize::tests::{H, cell, screen, steps, table_window};
 
@@ -5153,6 +5156,109 @@ mod tests {
         assert_menu(&h, &["Split Cells", "Merge Cells"], false);
         pick(&mut h, &["Delete", "Delete Table"]);
         assert!(h.state().session.doc.body.iter().all(|b| b.as_table().is_none()));
+    }
+
+    /// A window showing two overlapping floating rectangles, red then green in document order
+    /// (so green is on top), and their positions.
+    pub(crate) fn two_shapes_window() -> (H, wordcraft_doc::Pos, wordcraft_doc::Pos) {
+        use wordcraft_doc::para::{Anchor, Float, InlineObject, ShapeKind, Wrap};
+        let mut d = wordcraft_doc::Document::from_text("Text under the shapes.");
+        let obj = wordcraft_doc::para::OBJ.len_utf8();
+        for (i, (fill, x)) in [(wordcraft_doc::Rgb(220, 30, 30), 150.0), (wordcraft_doc::Rgb(30, 160, 60), 200.0)].into_iter().enumerate() {
+            let float = Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x, y: x, ..Default::default() };
+            let shape = InlineObject::Shape {
+                kind: ShapeKind::Rectangle,
+                w: 100.0,
+                h: 100.0,
+                fill: Some(fill),
+                stroke: None,
+                stroke_width: 0.0,
+                float,
+                story: None,
+                freeform: None,
+                effects: Default::default(),
+                extra: Default::default(),
+            };
+            d.insert_object(&Pos::body(0, i * obj), shape, &Default::default()).unwrap();
+        }
+        let a = WordApp::new(wordcraft_engine::Session::new(d), Default::default());
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.25).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        steps(&mut h, 6);
+        (h, Pos::body(0, 0), Pos::body(0, obj))
+    }
+
+    /// #2956: for a shape in line with the text, Bring to Front and Send to Back are greyed out,
+    /// as in Word.
+    #[test]
+    fn stacking_submenus_are_greyed_for_an_inline_shape() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let (mut h, red, _) = two_shapes_window();
+        let end = Pos { off: red.off + wordcraft_doc::para::OBJ.len_utf8(), ..red.clone() };
+        h.state_mut().run("select.range", json!({"anchor": red, "focus": end})).unwrap();
+        h.state_mut().run("arrange.wrap", json!({"wrap": "inline"})).unwrap();
+        steps(&mut h, 4);
+        let rect = h.state_mut().session.layout().object(&red, 0).expect("laid out").rect;
+        let at = crate::frame::to_screen(h.state().canvas.page_rects[0], h.state().canvas.scale, rect).center();
+        right_click(&mut h, at);
+        assert_menu(&h, &["Wrap Text", "Bring to Front", "Send to Back"], true);
+        let top = h.state().canvas.page_rects.first().map_or(0.0, |r| r.min.y);
+        for label in ["Bring to Front", "Send to Back"] {
+            let node = h.query_all_by_label_contains(label).find(|n| n.rect().min.y >= top).expect(label);
+            assert!(node.accesskit_node().is_disabled(), "{label} is greyed out");
+        }
+    }
+
+    /// #2956: right-clicking a floating shape offers Bring to Front and Send to Back, each with
+    /// its one-step move and the text layer; Bring to Front puts the lower of two overlapping
+    /// shapes on top, and a click where they overlap then picks it.
+    #[test]
+    fn right_click_on_a_shape_offers_the_stacking_order() {
+        let (mut h, red, green) = two_shapes_window();
+        let at = screen(&mut h, 170.0, 170.0);
+        let overlap = screen(&mut h, 225.0, 225.0);
+        assert_eq!(h.state_mut().session.layout().object_at(0, 225.0, 225.0, 0.0).map(|o| o.pos()), Some(green.clone()), "green is on top");
+        right_click(&mut h, at);
+        assert_eq!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).map(|(p, _)| p), Some(red.clone()));
+        assert_menu(&h, &["Wrap Text", "Bring to Front", "Send to Back"], true);
+        let entry = menu_entry(&h, "Send to Back").unwrap();
+        h.event(egui::Event::PointerMoved(entry));
+        steps(&mut h, 2);
+        assert_menu(&h, &["Send Backward", "Send Behind Text"], true);
+        let entry = menu_entry(&h, "Bring to Front").unwrap();
+        h.event(egui::Event::PointerMoved(entry));
+        steps(&mut h, 4);
+        assert_menu(&h, &["Bring Forward", "Bring in Front of Text"], true);
+        // The submenu's own Bring to Front: the entry right of the one that opened it.
+        let item = {
+            use egui_kittest::kittest::Queryable;
+            h.query_all_by_label_contains("Bring to Front").map(|n| n.rect()).filter(|r| r.min.x > entry.x).map(|r| r.center()).next()
+        };
+        let item = item.expect("Bring to Front in the submenu");
+        h.event(egui::Event::PointerMoved(item));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: item, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        steps(&mut h, 2);
+        assert_eq!(h.state_mut().session.layout().object_at(0, 225.0, 225.0, 0.0).map(|o| o.pos()), Some(red.clone()), "red is on top now");
+        // A click where they overlap selects red.
+        h.state_mut().session.sel = wordcraft_engine::Selection::caret(Pos::body(0, 6));
+        h.event(egui::Event::PointerMoved(overlap));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: overlap, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        steps(&mut h, 2);
+        assert_eq!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).map(|(p, _)| p), Some(red));
     }
 
     /// #1230: right-clicking a picture offers Insert Caption…, as in Word. For a picture in a

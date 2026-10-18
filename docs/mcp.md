@@ -118,6 +118,11 @@ files it was given rather than guarding against other software on the computer.
 `insert.picture` and `insert.icon` leave the caret after the new picture, so typing next doesn't
 replace it; Picture Format commands (`picture.*`, `arrange.*`) still act on it.
 
+`arrange.bringForward` and `arrange.sendBackward` move a floating object one step in the stacking
+order, as Word's buttons do, and are disabled for an object in line with the text (#2956). They
+used to set its wrapping to In Front of Text or Behind Text: scripts that want that use
+`arrange.bringInFrontOfText` or `arrange.sendBehindText`.
+
 Resources: `wordcraft://document` (inspect) and `wordcraft://commands`.
 
 The acceptance test `crates/mcp/src/tests.rs` writes a formatted document using MCP only.

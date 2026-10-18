@@ -2542,3 +2542,8 @@ preview	Title	제목
 	Type a size in any unit, such as 5 cm or 300 px. The other side follows, so the picture keeps its proportions.	5 cm 또는 300 px처럼 원하는 단위로 크기를 입력하세요. 다른 쪽도 함께 바뀌어 그림의 비율이 유지됩니다.
 
 	Import…	가져오기…
+	Bring to Front	맨 앞으로 가져오기
+	Bring in Front of Text	텍스트 앞으로 가져오기
+	Send to Back	맨 뒤로 보내기
+	Send Behind Text	텍스트 뒤로 보내기
+	select a floating picture or shape first	먼저 떠 있는 그림이나 도형을 선택하세요

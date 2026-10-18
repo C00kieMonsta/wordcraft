@@ -3957,6 +3957,11 @@ fn a_float_anchored_after_a_page_break_stays_on_its_paragraph_s_first_page() {
     assert!(shapes(&l.pages[1].items).is_empty(), "and not again on page two");
 }
 
+/// A floating object's stacking marks (they draw nothing).
+fn is_marker(it: &Placed) -> bool {
+    matches!(it, Placed::StackStart { .. } | Placed::StackEnd)
+}
+
 #[test]
 fn floats_in_headers_and_table_cells_are_drawn() {
     use wordcraft_doc::para::{Anchor, Float, Wrap};
@@ -3976,7 +3981,7 @@ fn floats_in_headers_and_table_cells_are_drawn() {
     let h = shapes(&l.pages[0].header);
     assert_eq!(h.len(), 1, "header float drawn");
     assert!((h[0].x - 400.0).abs() < 0.01 && (h[0].y - 20.0).abs() < 0.01, "page coordinates: {:?}", h[0]);
-    assert!(matches!(l.pages[0].header.first(), Some(Placed::Shape { .. })), "behind the header text");
+    assert!(matches!(crate::stack::stacked(&l.pages[0].header).find(|i| !is_marker(i)), Some(Placed::Shape { .. })), "behind the header text");
     let c = shapes(&l.pages[0].items);
     assert_eq!(c.len(), 1, "cell float drawn");
     assert!(c[0].x > 72.0 && c[0].x < 72.0 + 234.0, "inside the first cell: {:?}", c[0]);
@@ -4048,7 +4053,10 @@ fn header_cell_float_placed_on_the_page() {
         let s = shapes(&page.header);
         assert_eq!(s.len(), 1, "page {n}: {s:?}");
         assert!((s[0].x - x).abs() < 0.01 && (s[0].y - y).abs() < 0.01, "page {n}: centred on the page, not in the cell: {:?}", s[0]);
-        assert!(matches!(page.header.first(), Some(Placed::Shape { .. })), "page {n}: behind the header text");
+        assert!(
+            matches!(crate::stack::stacked(&page.header).find(|i| !is_marker(i)), Some(Placed::Shape { .. })),
+            "page {n}: behind the header text"
+        );
         let o = page.header.iter().find_map(|i| if let Placed::Object { rect, .. } = i { Some(*rect) } else { None }).unwrap();
         assert!((o.x - x).abs() < 0.01 && (o.y - y).abs() < 0.01, "page {n}: its area for selection: {o:?}");
         assert!(first_line_top(&page.items) < 80.0, "page {n}: the body isn't pushed down");
@@ -5565,6 +5573,26 @@ fn comment_balloons_widen_pages_beside_their_anchors() {
     assert_eq!(lines_of(&plain), lines_of(&l) - 4);
     // The leader starts at the anchor.
     assert!(l.pages[0].items.iter().any(|it| matches!(it, Placed::Rule { x0, x1, .. } if (*x0 - anchor.x).abs() < 0.5 && (*x1 - pw).abs() < 0.5)));
+}
+
+/// #2956: comment leaders and cards are drawn over the objects in front of the text: a leader
+/// running under a picture beside the commented text stays visible.
+#[test]
+fn comment_balloons_draw_over_objects_in_front_of_the_text() {
+    use wordcraft_doc::para::{Anchor, Float, Wrap};
+    let mut d = Document::from_text("The quarterly figures look strong.");
+    comment_on(&mut d, 0, 4, 13, "Ada Reviewer", "Check the totals", None);
+    let float = Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 300.0, y: 40.0, ..Default::default() };
+    let mut shape = rect_shape(250.0, 120.0, float);
+    if let InlineObject::Shape { fill, .. } = &mut shape {
+        *fill = Some(Rgb(200, 30, 30));
+    }
+    d.insert_object(&Pos::body(0, 0), shape, &Default::default()).unwrap();
+    let l = balloon_layout(&d);
+    let draws = display::page_display(&d, &l.pages[0], &display::DisplayOptions::default());
+    let shape = draws.iter().position(|x| matches!(x, display::Draw::Shape { fill: Some(Rgb(200, 30, 30)), .. })).expect("the shape");
+    let leader = draws.iter().position(|x| matches!(x, display::Draw::Line { stroke: display::Stroke::Dashed, .. })).expect("the leader");
+    assert!(shape < leader, "the leader is drawn over the shape: {shape} vs {leader}");
 }
 
 #[test]
@@ -8338,6 +8366,7 @@ fn split_cell_moves_image_frame() {
             text_box: None,
             wrap: Wrap::Square,
             origin: wordcraft_geom::Point::new(3.0, 145.0),
+            z: 0,
         };
         let mut kept = image.clone();
         kept.translate(0.0, top - 150.0);

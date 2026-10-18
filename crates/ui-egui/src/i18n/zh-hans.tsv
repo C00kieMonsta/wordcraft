@@ -2300,3 +2300,8 @@
 	Type a size in any unit, such as 5 cm or 300 px. The other side follows, so the picture keeps its proportions.	可用任意单位输入大小，例如 5 cm 或 300 px。另一边随之调整，图片保持原有比例。
 
 	Import…	导入…
+	Bring to Front	置于顶层
+	Bring in Front of Text	置于文字上方
+	Send to Back	置于底层
+	Send Behind Text	置于文字下方
+	select a floating picture or shape first	请先选择一个浮动的图片或形状

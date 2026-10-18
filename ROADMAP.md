@@ -139,6 +139,7 @@ Imported Word 97–2003 `.doc`/`.dot` files now ask for a supported DOCX target 
 - 2026-10-15: Find opens Navigation on Results; editing the query restores Results after manual Headings/Pages navigation. Typed and selected-text searches retain document contents (#2096).
 
 | Date | What landed |
+| 2026-10-18 | Shapes and pictures stack like Word's (#2956): Bring Forward and Send Backward step past the nearest overlapping object, Bring to Front and Send to Back go to the ends, and Bring in Front of Text and Send Behind Text change the layer. They sit in split buttons in Layout, Shape Format and Picture Format › Arrange and on the right-click menu. `arrange.bringForward` and `arrange.sendBackward` no longer change the wrapping and are disabled for inline objects: scripts that want the old behaviour use `arrange.bringInFrontOfText` and `arrange.sendBehindText`. Objects in front of the text now draw above all of it, a click picks the one on top, and the order is saved as `relativeHeight`. Shape Fill › Transparency makes a fill see-through (saved as `a:alpha`, drawn on screen and in PDF) |
 | 2026-10-17 | Edit Recipient List finds records (#1576): a Find in list box hides rows with no cell containing the text (any case) and counts the matches, and "Show only records that will be merged" hides the rows the filter leaves out; both only change the view. Rows are striped, and edits and removes go to the right record however the grid is narrowed |
 | 2026-10-14 | DOCX row table border exceptions render and survive saving. Explicit cell borders win; a row exception does not change other rows. |
 | 2026-10-14 | Tab stops edited on the ruler: the corner selector picks Left/Center/Right/Decimal/Bar, a click sets a stop (Alt skips the snap), dragging moves it with a guide line and position tooltip, dragging off the ruler clears it; markers draw per kind and mirror for RTL; one `para.tabs` call and one undo step per gesture |
@@ -765,3 +766,4 @@ Footer page-table height and body wrapping are corrected. Other pagination gaps 
 | 2026-10-15 | trivial | Progress log: mixed Hebrew/Latin text keeps its order in Word (#1543) |
 | 2026-10-15 | trivial | Progress log: ruler numbers by zoom, rulers follow the caret's page (#1878) |
 | 2026-10-17 | trivial | Progress log: saving into a folder that refuses a temporary file (#2138) |
+| 2026-10-18 | trivial | Progress log: stacking order and shape fill transparency (#2956) |

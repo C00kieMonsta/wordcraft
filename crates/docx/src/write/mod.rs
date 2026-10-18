@@ -82,6 +82,7 @@ pub(crate) struct Writer<'d> {
     docpr: u32,
     /// Shapes' own drawing ids written so far (connectors refer to them).
     shape_ids: std::collections::HashSet<u32>,
+    /// The last `relativeHeight` given to an object without a stacking order of its own.
     z: u32,
     /// Note part id → file note id, in first-reference order.
     footnotes: Vec<u32>,
@@ -157,7 +158,8 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
         // Fresh drawing ids start past the shapes' own (connectors refer to those).
         docpr: doc.next_shape_id().saturating_sub(1),
         shape_ids: std::collections::HashSet::new(),
-        z: 251_658_240,
+        // Objects without a stacking order of their own stack above those with one.
+        z: doc.top_z().max(251_658_240),
         footnotes: Vec::new(),
         endnotes: Vec::new(),
         hf: Vec::new(),

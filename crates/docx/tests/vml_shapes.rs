@@ -270,3 +270,23 @@ fn a_top_level_shape_still_finds_its_shapetype() {
     let InlineObject::Shape { kind, fill, .. } = objects(&d)[0] else { panic!("{:?}", objects(&d)) };
     assert_eq!((kind, fill), (ShapeKind::Diamond, Some(wordcraft_doc::Rgb(0x00, 0xff, 0x00))));
 }
+
+/// #2956: a VML shape's `z-index` stacks as in CSS: higher on top, negative ones (behind the text)
+/// included, whatever their document order (a colour band made first under a logo made later, in
+/// one header paragraph), and after saving and reopening.
+#[test]
+fn vml_z_index_stacks_higher_on_top() {
+    let rect = |z: i64| format!(r#"<v:rect style="position:absolute;margin-left:0;margin-top:0;width:100pt;height:50pt;z-index:{z}"/>"#);
+    // Whether the first shape is drawn below the second: ties go by document order.
+    let below = |d: &Document| {
+        let k: Vec<(bool, u32)> = objects(d).iter().filter_map(|o| o.frame()).map(|(_, _, f)| f.stack_key()).collect();
+        assert_eq!(k.len(), 2, "{k:?}");
+        k[0] <= k[1]
+    };
+    for (first, second) in [(-2, -1), (-1, -2), (-251_658_240, -251_657_216), (-251_657_216, -251_658_240), (1, 2), (2, 1)] {
+        let d = read_body(&pict(&format!("{}{}", rect(first), rect(second))));
+        assert_eq!(below(&d), first < second, "z-index {first} then {second}");
+        let d2 = wordcraft_docx::read(&wordcraft_docx::write(&d).unwrap()).unwrap();
+        assert_eq!(below(&d2), first < second, "saved: z-index {first} then {second}");
+    }
+}

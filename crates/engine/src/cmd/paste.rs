@@ -361,6 +361,7 @@ pub fn insert(s: &mut Session, mut frag: Fragment) -> Result<(), CmdError> {
             });
         }
     }
+    unstack(&mut frag);
     let end = s.doc.insert_fragment(&at, &frag)?;
     // The paragraph marks the paste added are inserted too, so rejecting it joins the
     // paragraphs again. The last paragraph ends with the original mark and keeps it.
@@ -378,6 +379,20 @@ pub fn insert(s: &mut Session, mut frag: Fragment) -> Result<(), CmdError> {
     }
     s.sel = Selection::caret(end);
     Ok(())
+}
+
+/// Pasted or inserted pictures and shapes go on top, as new ones do: they drop the stacking
+/// order they had where they came from (another document, a Quick Part, a file).
+pub(crate) fn unstack(frag: &mut Fragment) {
+    let mut clear = |p: &mut Paragraph| p.objects.iter_mut().filter_map(wordcraft_doc::InlineObject::float_mut).for_each(|f| f.z = 0);
+    for b in &mut frag.blocks {
+        each_para(b, 0, &mut clear);
+    }
+    for part in frag.parts.values_mut() {
+        for b in part.blocks.iter_mut() {
+            each_para(Arc::make_mut(b), 0, &mut clear);
+        }
+    }
 }
 
 /// Every paragraph in a block, tables included (bounded depth).

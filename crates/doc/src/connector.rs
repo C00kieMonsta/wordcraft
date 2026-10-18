@@ -41,10 +41,17 @@ pub struct ShapeExtra {
     /// The outline dash pattern; absent in older saved documents means solid.
     #[serde(skip_serializing_if = "crate::line_dash::LineDash::is_solid")]
     pub dash: crate::line_dash::LineDash,
+    /// The fill's transparency, percent (Format Shape › Fill › Transparency; DrawingML `a:alpha`
+    /// on the fill colour): 0 is opaque, 100 invisible.
+    #[serde(skip_serializing_if = "is_zero_f32")]
+    pub fill_transparency: f32,
 }
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
+}
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
 }
 fn is_false(v: &bool) -> bool {
     !*v
@@ -53,6 +60,11 @@ fn is_false(v: &bool) -> bool {
 impl ShapeExtra {
     pub fn is_empty(&self) -> bool {
         *self == ShapeExtra::default()
+    }
+    /// The fill's opacity, 0 to 1 (junk transparency counts as none).
+    pub fn fill_opacity(&self) -> f32 {
+        let t = if self.fill_transparency.is_finite() { self.fill_transparency.clamp(0.0, 100.0) } else { 0.0 };
+        1.0 - t / 100.0
     }
 }
 

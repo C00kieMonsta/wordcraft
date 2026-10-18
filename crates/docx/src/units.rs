@@ -58,6 +58,23 @@ pub fn int(s: &str) -> Option<i64> {
     v.is_finite().then(|| v.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64)
 }
 
+/// How far below a front object's stacking order a behind-text VML shape's `z-index` is:
+/// 0x1E000000, as Word is believed to write it (`relativeHeight` 251658240 behind the text is
+/// `z-index:-251658240`; not checked on a Word file).
+const VML_BEHIND: i64 = 503_316_480;
+
+/// A floating object's stacking order ([`wordcraft_doc::para::Float::z`]) from a VML `z-index`.
+/// Higher is on top, as in CSS, negatives included; 0 is none.
+pub fn z_from_vml(z: i64) -> u32 {
+    if z < 0 { u32::try_from(z.saturating_add(VML_BEHIND)).unwrap_or(0).max(1) } else { u32::try_from(z).unwrap_or(u32::MAX) }
+}
+
+/// The VML `z-index` of stacking order `z` (not 0) for an object behind the text or not: the
+/// inverse of [`z_from_vml`].
+pub fn vml_z_index(z: u32, behind: bool) -> i64 {
+    if behind { i64::from(z) - VML_BEHIND } else { i64::from(z) }
+}
+
 pub fn u32_of(s: &str) -> Option<u32> {
     int(s).map(|v| v.clamp(0, u32::MAX as i64) as u32)
 }
@@ -97,6 +114,22 @@ pub fn emu(pt: f32) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// #2956: VML `z-index` stacks as in CSS (higher on top, negatives included) among the
+    /// objects behind the text and among the others, in the same scale as DrawingML's
+    /// `relativeHeight`, and goes back to the same `z-index`.
+    #[test]
+    fn vml_z_index_keeps_its_order() {
+        for order in [&[-503_316_479, -251_658_240, -251_657_216, -2, -1][..], &[1, 2, 251_658_240, 251_659_264, i64::from(u32::MAX)]] {
+            let z: Vec<u32> = order.iter().map(|v| z_from_vml(*v)).collect();
+            assert!(z.windows(2).all(|w| w[0] < w[1]), "{order:?} → {z:?}");
+        }
+        assert_eq!(z_from_vml(-251_658_240), 251_658_240, "Word's behind-text order");
+        assert_eq!((z_from_vml(i64::MIN), z_from_vml(0), z_from_vml(i64::MAX)), (1, 0, u32::MAX));
+        for v in [-251_657_216, -1, 5, 251_659_264] {
+            assert_eq!(vml_z_index(z_from_vml(v), v < 0), v);
+        }
+    }
+
     use super::*;
 
     #[test]

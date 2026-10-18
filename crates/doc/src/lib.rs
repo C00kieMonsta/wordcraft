@@ -1291,6 +1291,107 @@ impl Document {
         max.saturating_add(1).max(1)
     }
 
+    /// The highest stacking order a floating object has ([`para::Float::z`]); 0 when none has one.
+    pub fn top_z(&self) -> u32 {
+        let mut max = 0u32;
+        let mut see = |o: &InlineObject| {
+            if let Some((_, _, f)) = o.frame().filter(|(_, _, f)| f.wrap != para::Wrap::Inline) {
+                max = max.max(f.z);
+            }
+        };
+        for blocks in std::iter::once(&self.body).chain(self.parts.values().map(|p| &p.blocks)) {
+            for b in blocks {
+                edit::each_para(b, 0, &mut |p| p.objects.iter().for_each(&mut see));
+            }
+        }
+        max
+    }
+
+    /// Settles the stacking orders a file gave its floating objects ([`para::Float::z`]). When, in
+    /// every story, they only repeat document order (what a file written without arranging
+    /// says), they are cleared: the objects stack by document order, as before. Otherwise an
+    /// object the file gave none takes the order of its nearest earlier neighbour in its layer
+    /// (behind the text or in front; else the next one's), so it keeps its place in document
+    /// order instead of going on top.
+    pub fn settle_stacking(&mut self) {
+        let floating = |o: &InlineObject| o.frame().is_some_and(|(_, _, f)| f.wrap != para::Wrap::Inline);
+        let mut stories: Vec<&mut Blocks> = vec![&mut self.body];
+        stories.extend(self.parts.values_mut().map(|p| &mut p.blocks));
+        // Each story's orders and layers (in front of the text or not), in document order.
+        let zs: Vec<Vec<(u32, bool)>> = stories
+            .iter()
+            .map(|blocks| {
+                let mut v = Vec::new();
+                for b in blocks.iter() {
+                    edit::each_para(b, 0, &mut |p| {
+                        v.extend(
+                            p.objects
+                                .iter()
+                                .filter(|o| floating(o))
+                                .filter_map(|o| o.frame().map(|(_, _, f)| (f.z, f.wrap != para::Wrap::BehindText))),
+                        )
+                    });
+                }
+                v
+            })
+            .collect();
+        let ordered = |v: &Vec<(u32, bool)>| v.iter().filter(|z| z.0 != 0).collect::<Vec<_>>().windows(2).all(|w| w[0].0 <= w[1].0);
+        if zs.iter().all(|v| v.iter().all(|z| z.0 == 0)) {
+            return;
+        }
+        let redundant = zs.iter().all(ordered);
+        for (blocks, v) in stories.into_iter().zip(zs) {
+            let want: Vec<u32> = if redundant {
+                vec![0; v.len()]
+            } else {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &(z, front))| {
+                        let near = |o: &&(u32, bool)| o.0 != 0 && o.1 == front;
+                        match z {
+                            0 => v
+                                .get(..i)
+                                .and_then(|b| b.iter().rev().find(near))
+                                .or_else(|| v.get(i..).and_then(|a| a.iter().find(near)))
+                                .map_or(0, |o| o.0),
+                            z => z,
+                        }
+                    })
+                    .collect()
+            };
+            if want.iter().zip(&v).all(|(w, (z, _))| w == z) {
+                continue;
+            }
+            let mut k = 0usize;
+            for b in blocks.iter_mut() {
+                let (mut n, mut change) = (0usize, false);
+                edit::each_para(b, 0, &mut |p| {
+                    for (_, _, f) in p.objects.iter().filter(|o| floating(o)).filter_map(InlineObject::frame) {
+                        change |= want.get(k + n).is_some_and(|w| *w != f.z);
+                        n += 1;
+                    }
+                });
+                if change {
+                    let mut i = k;
+                    edit::each_para_mut(Arc::make_mut(b), 0, &mut |p| {
+                        let mut touched = false;
+                        for o in p.objects.iter_mut().filter(|o| floating(o)) {
+                            if let (Some(f), Some(w)) = (o.float_mut(), want.get(i)) {
+                                touched |= f.z != *w;
+                                f.z = *w;
+                            }
+                            i += 1;
+                        }
+                        if touched {
+                            p.touch();
+                        }
+                    });
+                }
+                k += n;
+            }
+        }
+    }
+
     /// Change every inline object in every story (paragraphs inside tables too), copying only
     /// the blocks whose paragraphs `wants` says have objects to change.
     pub fn objects_mut(&mut self, wants: &dyn Fn(&InlineObject) -> bool, f: &mut dyn FnMut(&mut InlineObject)) {

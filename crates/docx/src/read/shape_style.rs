@@ -112,6 +112,8 @@ pub(crate) struct ShapePaint {
     pub stroke: Option<Rgb>,
     /// Points.
     pub stroke_width: f32,
+    /// The fill's transparency, percent (its colour's `a:alpha`).
+    pub fill_transparency: f32,
 }
 
 /// The paint of a shape from its properties `sppr`, falling back on its style `style` (theme
@@ -122,10 +124,12 @@ pub(crate) fn shape_paint(sppr: Option<&El>, style: Option<&El>, theme: &[Rgb]) 
         let r = style?.child(name)?;
         Some((r.attr("idx").and_then(int).unwrap_or(0), r))
     };
-    let fill = match sppr {
-        Some(s) if s.child("a:noFill").is_some() || s.child("a:blipFill").is_some() => None,
-        Some(s) if s.els().any(|c| matches!(c.name.as_str(), "a:solidFill" | "a:gradFill" | "a:pattFill")) => fill_colour(s, theme),
-        _ => style_ref("a:fillRef").filter(|(idx, _)| *idx > 0).and_then(|(_, r)| color(r, theme)),
+    let (fill, fill_transparency) = match sppr {
+        Some(s) if s.child("a:noFill").is_some() || s.child("a:blipFill").is_some() => (None, 0.0),
+        Some(s) if s.els().any(|c| matches!(c.name.as_str(), "a:solidFill" | "a:gradFill" | "a:pattFill")) => {
+            (fill_colour(s, theme), s.child("a:solidFill").map_or(0.0, transparency))
+        }
+        _ => style_ref("a:fillRef").filter(|(idx, _)| *idx > 0).map_or((None, 0.0), |(_, r)| (color(r, theme), transparency(r))),
     };
     let ln = sppr.and_then(|s| s.child("a:ln"));
     let line_ref = style_ref("a:lnRef").filter(|(idx, _)| *idx > 0);
@@ -142,7 +146,15 @@ pub(crate) fn shape_paint(sppr: Option<&El>, style: Option<&El>, theme: &[Rgb]) 
         // Word's default outline when the file names none (no outline: no width).
         .unwrap_or(if stroke.is_some() { 0.75 } else { 0.0 })
         .clamp(0.0, 100.0);
-    ShapePaint { fill, stroke, stroke_width }
+    ShapePaint { fill, stroke, stroke_width, fill_transparency }
+}
+
+/// The transparency, percent, of the colour in fill `e` (or `e` itself): its `a:alpha`
+/// (ECMA-376 Part 1 §20.1.2.3.1) is the opacity in 1000ths of a percent. 0 without one.
+fn transparency(e: &El) -> f32 {
+    let c = if e.child("a:alpha").is_some() { Some(e) } else { e.els().find(|c| c.child("a:alpha").is_some()) };
+    let Some(v) = c.and_then(|c| c.child("a:alpha")).and_then(|a| a.attr("val")).and_then(dash_ratio) else { return 0.0 };
+    (100.0 - v.min(100_000) as f32 / 1000.0).clamp(0.0, 100.0)
 }
 
 /// Explicit DrawingML dash stops override the solid default.
@@ -254,6 +266,34 @@ mod tests {
         );
         let p = shape_paint(Some(&sp), Some(&st), &THEME_COLORS);
         assert_eq!((p.fill, p.stroke), (None, None));
+    }
+
+    /// #2956: a fill colour's `a:alpha` (opacity) is the shape's fill transparency.
+    #[test]
+    fn fill_alpha_is_the_transparency() {
+        let sp = el(
+            r#"<wps:spPr xmlns:wps="w" xmlns:a="a"><a:solidFill><a:srgbClr val="FF0000"><a:alpha val="60000"/></a:srgbClr></a:solidFill></wps:spPr>"#,
+        );
+        let p = shape_paint(Some(&sp), None, &THEME_COLORS);
+        assert_eq!((p.fill, p.fill_transparency), (Some(Rgb(0xFF, 0, 0)), 40.0));
+        // Strict OOXML's percent, a theme colour with modifiers, a style's fill, junk.
+        let sp = el(
+            r#"<wps:spPr xmlns:wps="w" xmlns:a="a"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="75000"/><a:alpha val="25%"/></a:schemeClr></a:solidFill></wps:spPr>"#,
+        );
+        assert_eq!(shape_paint(Some(&sp), None, &THEME_COLORS).fill_transparency, 75.0);
+        let st = el(
+            r#"<wps:style xmlns:wps="w" xmlns:a="a"><a:fillRef idx="1"><a:schemeClr val="accent1"><a:alpha val="50000"/></a:schemeClr></a:fillRef></wps:style>"#,
+        );
+        assert_eq!(shape_paint(None, Some(&st), &THEME_COLORS).fill_transparency, 50.0);
+        for junk in ["-5", "999999999999", "x", "250000"] {
+            let sp = el(&format!(
+                r#"<wps:spPr xmlns:wps="w" xmlns:a="a"><a:solidFill><a:srgbClr val="FF0000"><a:alpha val="{junk}"/></a:srgbClr></a:solidFill></wps:spPr>"#
+            ));
+            let t = shape_paint(Some(&sp), None, &THEME_COLORS).fill_transparency;
+            assert!((0.0..=100.0).contains(&t), "{junk}: {t}");
+        }
+        let sp = el(r#"<wps:spPr xmlns:wps="w" xmlns:a="a"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr>"#);
+        assert_eq!(shape_paint(Some(&sp), None, &THEME_COLORS).fill_transparency, 0.0);
     }
 
     #[test]

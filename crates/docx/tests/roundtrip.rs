@@ -2684,3 +2684,109 @@ fn drop_cap_options_round_trip() {
         (Some(4), Some(true), None, None)
     );
 }
+
+/// A floating rectangle filled `fill`, with stacking order `z` and fill transparency `t` (%).
+fn stacked_shape(fill: Rgb, z: u32, t: f32) -> InlineObject {
+    InlineObject::Shape {
+        kind: ShapeKind::Rectangle,
+        w: 72.0,
+        h: 36.0,
+        fill: Some(fill),
+        stroke: None,
+        stroke_width: 0.0,
+        float: Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Page, v_rel: Anchor::Page, x: 100.0, y: 100.0, z, ..Default::default() },
+        story: None,
+        freeform: None,
+        effects: Default::default(),
+        extra: wordcraft_doc::connector::ShapeExtra { fill_transparency: t, ..Default::default() },
+    }
+}
+
+fn shapes_doc(objects: &[InlineObject]) -> Document {
+    let mut p = Paragraph::with_text("shapes", CharProps::default());
+    for o in objects {
+        let end = p.len();
+        p.insert_object(end, o.clone(), &CharProps::default()).unwrap();
+    }
+    doc_with(vec![p])
+}
+
+fn z_of(d: &Document) -> Vec<u32> {
+    paras(d)[0].objects.iter().filter_map(|o| o.frame().map(|(_, _, f)| f.z)).collect()
+}
+
+/// The package `bytes` with its `word/document.xml` replaced by `xml`.
+fn with_document_xml(bytes: &[u8], xml: &str) -> Vec<u8> {
+    use std::io::{Read, Write};
+    let mut zr = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut zw = zip::ZipWriter::new(&mut out);
+    for i in 0..zr.len() {
+        let mut f = zr.by_index(i).unwrap();
+        let name = f.name().to_string();
+        let mut data = Vec::new();
+        f.read_to_end(&mut data).unwrap();
+        if name == "word/document.xml" {
+            data = xml.as_bytes().to_vec();
+        }
+        zw.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        zw.write_all(&data).unwrap();
+    }
+    zw.finish().unwrap();
+    out.into_inner()
+}
+
+/// #2956: the stacking order is `wp:anchor/@relativeHeight`. An order that differs from the
+/// document's is kept; objects without one are written above every object that has one; an
+/// order that only repeats the document's reads back as none.
+#[test]
+fn stacking_order_round_trips() {
+    let (r, g, b) = (Rgb(255, 0, 0), Rgb(0, 255, 0), Rgb(0, 0, 255));
+    let d = shapes_doc(&[stacked_shape(r, 3, 0.0), stacked_shape(g, 1, 0.0), stacked_shape(b, 2, 0.0)]);
+    assert_eq!(z_of(&rt(&d)), [3, 1, 2]);
+    // None of its own stacks on top, in the file too.
+    let d = shapes_doc(&[stacked_shape(r, 7, 0.0), stacked_shape(g, 0, 0.0), stacked_shape(b, 3, 0.0)]);
+    let xml = document_xml(&wordcraft_docx::write(&d).unwrap());
+    let heights: Vec<u32> = xml.split("relativeHeight=\"").skip(1).filter_map(|s| s.split('"').next()).map(|v| v.parse().unwrap()).collect();
+    assert_eq!(heights.len(), 3, "{xml}");
+    assert!(heights[0] == 7 && heights[2] == 3 && heights[1] > 7, "{heights:?}");
+    let z = z_of(&rt(&d));
+    assert!(z[2] < z[0] && z[0] < z[1], "{z:?}");
+    // The document's own order (what a file written without arranging says) is no order.
+    let d = shapes_doc(&[stacked_shape(r, 0, 0.0), stacked_shape(g, 0, 0.0)]);
+    assert_eq!(rt(&d), d);
+    let d = shapes_doc(&[stacked_shape(r, 251_659_264, 0.0), stacked_shape(g, 251_660_288, 0.0)]);
+    assert_eq!(z_of(&rt(&d)), [0, 0]);
+}
+
+/// #2956: a shape's fill transparency is its fill colour's `a:alpha` (the opacity).
+#[test]
+fn fill_transparency_round_trips() {
+    let d = shapes_doc(&[stacked_shape(Rgb(255, 0, 0), 0, 40.0), stacked_shape(Rgb(0, 0, 255), 0, 0.0)]);
+    let xml = document_xml(&wordcraft_docx::write(&d).unwrap());
+    assert_eq!(xml.matches(r#"<a:alpha val="60000"/>"#).count(), 1, "{xml}");
+    assert_eq!(rt(&d), d);
+}
+
+/// #2956: hostile stacking orders and alphas read as none.
+#[test]
+fn hostile_relative_heights_read_as_none() {
+    let d = shapes_doc(&[stacked_shape(Rgb(255, 0, 0), 9, 0.0), stacked_shape(Rgb(0, 0, 255), 4, 0.0)]);
+    let bytes = wordcraft_docx::write(&d).unwrap();
+    let xml = document_xml(&bytes);
+    for junk in ["-1", "99999999999", "x", ""] {
+        let bad = xml.replacen("relativeHeight=\"9\"", &format!("relativeHeight=\"{junk}\""), 1);
+        let r = wordcraft_docx::read(&with_document_xml(&bytes, &bad)).unwrap();
+        // The first reads as none and keeps its place in document order: no order at all.
+        assert_eq!(z_of(&r), [0, 0], "{junk}");
+    }
+    for junk in ["-5", "250000", "x", "1e99"] {
+        let bad = xml.replacen("<a:srgbClr val=\"FF0000\"/>", &format!("<a:srgbClr val=\"FF0000\"><a:alpha val=\"{junk}\"/></a:srgbClr>"), 1);
+        let r = wordcraft_docx::read(&with_document_xml(&bytes, &bad)).unwrap();
+        let t = paras(&r)[0].objects.iter().find_map(|o| match o {
+            InlineObject::Shape { extra, .. } => Some(extra.fill_transparency),
+            _ => None,
+        });
+        assert!(t.is_some_and(|t| (0.0..=100.0).contains(&t)), "{junk}: {t:?}");
+    }
+}

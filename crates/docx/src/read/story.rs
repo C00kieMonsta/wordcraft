@@ -1439,7 +1439,8 @@ impl Reader<'_> {
         {
             part.body.auto_color = Some(rgb);
         }
-        let mut extra = ShapeExtra { dash: super::shape_style::line_dash(ln), ..Default::default() };
+        let fill_transparency = if fill.is_some() { paint.fill_transparency } else { 0.0 };
+        let mut extra = ShapeExtra { dash: super::shape_style::line_dash(ln), fill_transparency, ..Default::default() };
         // A rounded rectangle's own corner (`adj`, ECMA-376 §20.1.10.56); other presets drawn as
         // rounded rectangles keep the default.
         if prst == "roundRect" {
@@ -1997,6 +1998,8 @@ fn anchor_float(c: &El) -> Float {
     f.dist_bottom = dist("distB");
     // Required by the schema; a file leaving it out lays out in the cell, as before.
     f.outside_cell = !on_off_attr(c, "layoutInCell") && c.attr("layoutInCell").is_some();
+    // Stacking order; junk (or a value past the schema's unsigned int) is none.
+    f.z = c.attr("relativeHeight").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
     f
 }
 
@@ -2168,6 +2171,8 @@ fn vml_float(shape: &El, style: &str, in_hf: bool) -> Float {
         // Word for Mac draws a VML shape anchored in a header table cell on the page whatever
         // `o:allowincell` says (user-checked), as for Word's picture and text watermarks.
         outside_cell: in_hf,
+        // The stacking order: higher on top, as in CSS (see `z_from_vml`).
+        z: get("z-index").and_then(int).map_or(0, crate::units::z_from_vml),
         ..Float::default()
     };
     f.set_spin(vml_spin(style));

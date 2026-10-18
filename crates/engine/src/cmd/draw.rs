@@ -325,8 +325,7 @@ impl PlacedInk {
 /// turn and geometry on the page.
 pub fn ink_on(s: &Session, layout: &DocLayout, page: usize) -> Vec<PlacedInk> {
     let Some(pg) = layout.pages.get(page) else { return Vec::new() };
-    pg.items
-        .iter()
+    wordcraft_layout::stack::stacked(&pg.items)
         .filter_map(|it| match it {
             Placed::Object { rect, spin, story, path, off, .. } => {
                 let pos = Pos { story: *story, path: path.clone(), off: *off };
